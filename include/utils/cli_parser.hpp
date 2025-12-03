@@ -11,9 +11,12 @@ namespace utils {
  * @brief Structure to hold parsed command-line arguments
  */
 struct CliArgs {
-  std::string segy_filepath; ///< Path to SEG-Y file or .tar.gz archive
+  std::string segy_filepath; ///< Path to SEG-Y file
   int num_iterations = -1;   ///< Number of iterations (-1 = use default)
   bool verbose = false;      ///< Enable verbose output
+  size_t snapshot_interval =
+      0; ///< Save snapshots every N timesteps (0 = disabled)
+  std::string snapshot_dir = ""; ///< Output directory for snapshots
 };
 
 /**
@@ -28,11 +31,13 @@ struct CliArgs {
  *
  * @param argc Argument count from main()
  * @param argv Argument vector from main()
- * @param rank MPI rank (used to determine which rank should enable verbose output)
- * @return Expected containing CliArgs on success, or error message string on failure
+ * @param rank MPI rank (used to determine which rank should enable verbose
+ * output)
+ * @return Expected containing CliArgs on success, or error message string on
+ * failure
  */
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
-                                                        int rank);
+                                                       int rank);
 
 /**
  * @brief Print usage information

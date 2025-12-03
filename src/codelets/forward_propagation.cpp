@@ -1,4 +1,6 @@
 #include "codelets/forward_propagation.hpp"
+#include "acoustics/finite_difference_solver.hpp"
+#include "utils/snapshot_writer.hpp"
 #include <chrono>
 #include <print>
 
@@ -125,6 +127,26 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     // Propagate one time step
     propagator.step();
+
+    // Save wavefield snapshot if enabled
+    if (task_config->snapshot_interval > 0 &&
+        t % task_config->snapshot_interval == 0) {
+      std::string snapshot_file = utils::SnapshotWriter::generate_filename(
+          task_config->snapshot_dir, utils::FieldType::PRESSURE, shot->shot_id,
+          t);
+
+      bool success = utils::SnapshotWriter::write_snapshot(
+          snapshot_file, propagator.get_pressure_field(), task_config->nx,
+          task_config->ny, task_config->nz, task_config->dx, task_config->dy,
+          task_config->dz, t, task_config->dt, utils::FieldType::PRESSURE);
+
+      if (!success && verbose) {
+        std::println(stderr,
+                     "[starfwi][{}][forward_propagation_cpu] WARNING: Failed "
+                     "to save snapshot at t={}",
+                     hostname, t);
+      }
+    }
 
     // Progress reporting (every 10% of total timesteps)
     if (verbose && t % progress_interval == 0) {

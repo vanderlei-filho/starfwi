@@ -13,7 +13,9 @@ void print_usage(const char *program_name) {
                program_name);
   std::println(stderr, "");
   std::println(stderr, "Options:");
-  std::println(stderr, "  -v, --verbose    Enable verbose output");
+  std::println(stderr, "  -v, --verbose              Enable verbose output");
+  std::println(stderr, "  --snapshots N              Save wavefield snapshots every N timesteps");
+  std::println(stderr, "  --snapshot-dir DIR         Output directory for snapshots (default: ./output)");
   std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
@@ -27,12 +29,15 @@ void print_usage(const char *program_name) {
   std::println(stderr, "Examples:");
   std::println(stderr, "  {} velocity_model.segy", program_name);
   std::println(stderr, "  {} -v velocity_model.segy 500", program_name);
-  std::println(stderr, "  {} --verbose velocity_model.segy", program_name);
+  std::println(stderr, "  {} --snapshots 10 --snapshot-dir ./viz velocity_model.segy 100", program_name);
 }
 
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
                                                        int rank) {
   CliArgs args;
+
+  // Default snapshot directory
+  args.snapshot_dir = "./output";
 
   // Parse arguments
   int positional_count = 0;
@@ -42,6 +47,27 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
     // Check for flags
     if (arg == "-v" || arg == "--verbose") {
       args.verbose = true;
+      continue;
+    }
+
+    if (arg == "--snapshots") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--snapshots requires an argument");
+      }
+      try {
+        args.snapshot_interval = std::stoul(argv[++i]);
+      } catch (const std::exception &e) {
+        return std::unexpected(
+            std::format("Invalid snapshot interval: '{}'", argv[i]));
+      }
+      continue;
+    }
+
+    if (arg == "--snapshot-dir") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--snapshot-dir requires an argument");
+      }
+      args.snapshot_dir = argv[++i];
       continue;
     }
 

@@ -1,6 +1,7 @@
 #include "codelets/forward_propagation.hpp"
 #include "utils/cli_parser.hpp"
 #include "utils/segy_loader.hpp"
+#include "utils/snapshot_writer.hpp"
 #include "utils/wavelet.hpp"
 #include <algorithm>
 #include <chrono>
@@ -89,11 +90,11 @@ int main(int argc, char **argv) {
     }
     min_spacing = std::min(min_spacing, config.grid.dz);
 
-    // Calculate stable timestep with safety factor of 0.5
+    // Calculate stable timestep with safety factor of 0.95
     float cfl_limit =
         min_spacing /
         (max_velocity * std::sqrt(config.grid.ny == 1 ? 2.0f : 3.0f));
-    config.time.dt = 0.5f * cfl_limit;
+    config.time.dt = 0.95f * cfl_limit;
 
     if (rank == 0 and args.verbose) {
       std::println(
@@ -130,7 +131,7 @@ int main(int argc, char **argv) {
   if (!config.source.x_positions.empty()) {
     n_shots = config.source.x_positions.size();
   } else {
-    n_shots = 8; // Default: 8 shots
+    n_shots = 1; // Default: 8 shots
   }
 
   // All ranks allocate shots vector
@@ -212,6 +213,19 @@ int main(int argc, char **argv) {
       "[starfwi][{}] Data acquisition geometry initialization completed",
       node_name);
 
+  // Save velocity model snapshot (rank 0 only)
+  if (rank == 0 && args.snapshot_interval > 0) {
+    std::string vel_file = starfwi::utils::SnapshotWriter::generate_filename(
+        args.snapshot_dir, starfwi::utils::FieldType::VELOCITY, 0, 0);
+    bool success = starfwi::utils::SnapshotWriter::write_snapshot(
+        vel_file, config.velocity_model.data, config.grid.nx, config.grid.ny,
+        config.grid.nz, config.grid.dx, config.grid.dy, config.grid.dz, 0,
+        config.time.dt, starfwi::utils::FieldType::VELOCITY);
+    if (success && args.verbose) {
+      std::println("[starfwi] Saved velocity model to {}", vel_file);
+    }
+  }
+
   // ========== STEP 6: REGISTER DATA WITH STARPU ==========
   // All ranks have loaded the velocity model, so we can register it directly
   size_t n_velocity = config.grid.nx * config.grid.ny * config.grid.nz;
@@ -234,6 +248,9 @@ int main(int argc, char **argv) {
   task_config.dz = config.grid.dz;
   task_config.dt = config.time.dt;
   task_config.nt = config.time.nt;
+  task_config.snapshot_interval = args.snapshot_interval;
+  std::strncpy(task_config.snapshot_dir, args.snapshot_dir.c_str(), 255);
+  task_config.snapshot_dir[255] = '\0';
 
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,

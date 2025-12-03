@@ -1,7 +1,6 @@
 #ifndef FORWARD_PROPAGATION_HPP
 #define FORWARD_PROPAGATION_HPP
 
-#include "acoustics/finite_difference_solver.hpp"
 #include <starpu.h>
 #include <starpu_mpi.h>
 #include <vector>
@@ -10,10 +9,12 @@ namespace starfwi {
 
 // POD struct for task parameters (safe to transfer via MPI)
 struct TaskConfig {
-  size_t nx, ny, nz; // Grid dimensions
-  float dx, dy, dz;  // Grid spacing
-  float dt;          // Time step
-  size_t nt;         // Number of time steps
+  size_t nx, ny, nz;        // Grid dimensions
+  float dx, dy, dz;         // Grid spacing
+  float dt;                 // Time step
+  size_t nt;                // Number of time steps
+  size_t snapshot_interval; // Save wavefield every N timesteps (0 = disabled)
+  char snapshot_dir[256];   // Output directory for snapshots
 };
 
 // Codelet argument to pass MPI rank and host information

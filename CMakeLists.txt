@@ -20,6 +20,7 @@ add_executable(starfwi
     src/utils/cli_parser.cpp
     src/utils/wavelet.cpp
     src/utils/segy_loader.cpp
+    src/utils/snapshot_writer.cpp
     src/acoustics/finite_difference_solver.cpp
     src/codelets/forward_propagation.cpp
 )
