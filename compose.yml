@@ -1,0 +1,38 @@
+services:
+  node1:
+    image: starfwi-test-image
+    container_name: starfwi-test-node-1
+    hostname: node1
+    networks:
+      - starfwi-network
+    volumes:
+      - ./.local_shared_volume:/shared
+    stdin_open: true
+    tty: true
+    command: /bin/bash -c "/usr/sbin/sshd -D"
+    cpus: 2
+
+  node2:
+    image: starfwi-test-image
+    container_name: starfwi-test-node-2
+    hostname: node2
+    networks:
+      - starfwi-network
+    volumes:
+      - ./.local_shared_volume:/shared
+    stdin_open: true
+    tty: true
+    command: /bin/bash -c "/usr/sbin/sshd -D"
+    cpus: 3
+
+  starvz-shell:
+    image: starvz-shell
+    container_name: starvz-shell
+    volumes:
+      - ./.local_shared_volume:/shared
+    stdin_open: true
+    tty: true
+
+networks:
+  starfwi-network:
+    driver: bridge

@@ -1,0 +1,17 @@
+CompileFlags:
+  Add:
+    - "-std=c++23"
+    - "-stdlib=libc++"
+    - "-I./include"
+    - "-I/opt/homebrew/include"
+    - "-I/usr/local/include"
+    - "-I/usr/local/include/starpu/1.4"
+    - "-I/opt/homebrew/Cellar/hwloc/2.12.2/include"
+    - "-I/opt/homebrew/Cellar/llvm/21.1.2/include/c++/v1"
+    - "-I/opt/homebrew/Cellar/llvm/21.1.2/lib/clang/21/include"
+    - "-I/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/include"
+    - "-isysroot"
+    - "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+    - "-DSTARPU_OPENCL_DATADIR=\"/usr/local/share/starpu/opencl\""
+    - "-DCL_USE_DEPRECATED_OPENCL_1_1_APIS"
+  CompilationDatabase: build/
