@@ -3,38 +3,40 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <print>
 
 namespace starfwi {
 namespace utils {
 
-bool SnapshotWriter::write_snapshot(const std::string &filename,
-                                    const std::vector<float> &data, uint32_t nx,
-                                    uint32_t ny, uint32_t nz, float dx,
-                                    float dy, float dz, uint32_t timestep,
-                                    float dt, FieldType field_type) {
+std::expected<void, std::string>
+SnapshotWriter::write_snapshot(const std::string &filename,
+                               const std::vector<float> &data, uint32_t nx,
+                               uint32_t ny, uint32_t nz, float dx, float dy,
+                               float dz, uint32_t timestep, float dt,
+                               FieldType field_type) {
   // Validate input
   size_t expected_size = static_cast<size_t>(nx) * ny * nz;
   if (data.size() != expected_size) {
-    std::println(stderr,
-                 "[snapshot_writer] ERROR: Data size mismatch. Expected {} "
-                 "elements, got {}",
-                 expected_size, data.size());
-    return false;
+    return std::unexpected(std::format(
+        "Data size mismatch. Expected {} elements, got {}", expected_size,
+        data.size()));
   }
 
   // Create output directory if it doesn't exist
   std::filesystem::path filepath(filename);
   if (filepath.has_parent_path()) {
-    std::filesystem::create_directories(filepath.parent_path());
+    try {
+      std::filesystem::create_directories(filepath.parent_path());
+    } catch (const std::filesystem::filesystem_error &e) {
+      return std::unexpected(
+          std::format("Failed to create directory {}: {}",
+                      filepath.parent_path().string(), e.what()));
+    }
   }
 
   // Open file for binary writing
   std::ofstream file(filename, std::ios::binary | std::ios::trunc);
   if (!file) {
-    std::println(stderr, "[snapshot_writer] ERROR: Failed to open file: {}",
-                 filename);
-    return false;
+    return std::unexpected(std::format("Failed to open file: {}", filename));
   }
 
   // Write header
@@ -69,12 +71,11 @@ bool SnapshotWriter::write_snapshot(const std::string &filename,
              data.size() * sizeof(float));
 
   if (!file) {
-    std::println(stderr, "[snapshot_writer] ERROR: Failed to write data to {}",
-                 filename);
-    return false;
+    return std::unexpected(
+        std::format("Failed to write data to {}", filename));
   }
 
-  return true;
+  return {};
 }
 
 std::string SnapshotWriter::generate_filename(const std::string &base_dir,

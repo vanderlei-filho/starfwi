@@ -2,6 +2,7 @@
 #define SNAPSHOT_WRITER_HPP
 
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <vector>
 
@@ -28,11 +29,11 @@ public:
   // timestep: current timestep index
   // dt: timestep size in seconds
   // field_type: type of field being saved
-  static bool write_snapshot(const std::string &filename,
-                             const std::vector<float> &data, uint32_t nx,
-                             uint32_t ny, uint32_t nz, float dx, float dy,
-                             float dz, uint32_t timestep, float dt,
-                             FieldType field_type);
+  // Returns: void on success, error message on failure
+  static std::expected<void, std::string>
+  write_snapshot(const std::string &filename, const std::vector<float> &data,
+                 uint32_t nx, uint32_t ny, uint32_t nz, float dx, float dy,
+                 float dz, uint32_t timestep, float dt, FieldType field_type);
 
   // Helper to generate standard filename
   // base_dir: output directory

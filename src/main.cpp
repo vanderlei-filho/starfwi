@@ -217,12 +217,17 @@ int main(int argc, char **argv) {
   if (rank == 0 && args.snapshot_interval > 0) {
     std::string vel_file = starfwi::utils::SnapshotWriter::generate_filename(
         args.snapshot_dir, starfwi::utils::FieldType::VELOCITY, 0, 0);
-    bool success = starfwi::utils::SnapshotWriter::write_snapshot(
+    auto result = starfwi::utils::SnapshotWriter::write_snapshot(
         vel_file, config.velocity_model.data, config.grid.nx, config.grid.ny,
         config.grid.nz, config.grid.dx, config.grid.dy, config.grid.dz, 0,
         config.time.dt, starfwi::utils::FieldType::VELOCITY);
-    if (success && args.verbose) {
-      std::println("[starfwi] Saved velocity model to {}", vel_file);
+    if (result) {
+      if (args.verbose) {
+        std::println("[starfwi] Saved velocity model to {}", vel_file);
+      }
+    } else {
+      std::println(stderr, "[starfwi] ERROR: Failed to save velocity model: {}",
+                   result.error());
     }
   }
 

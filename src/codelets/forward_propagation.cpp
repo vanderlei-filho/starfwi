@@ -135,16 +135,16 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
           task_config->snapshot_dir, utils::FieldType::PRESSURE, shot->shot_id,
           t);
 
-      bool success = utils::SnapshotWriter::write_snapshot(
+      auto result = utils::SnapshotWriter::write_snapshot(
           snapshot_file, propagator.get_pressure_field(), task_config->nx,
           task_config->ny, task_config->nz, task_config->dx, task_config->dy,
           task_config->dz, t, task_config->dt, utils::FieldType::PRESSURE);
 
-      if (!success && verbose) {
+      if (!result && verbose) {
         std::println(stderr,
                      "[starfwi][{}][forward_propagation_cpu] WARNING: Failed "
-                     "to save snapshot at t={}",
-                     hostname, t);
+                     "to save snapshot at t={}: {}",
+                     hostname, t, result.error());
       }
     }
 
