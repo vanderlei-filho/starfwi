@@ -1,5 +1,6 @@
 #include "codelets/forward_propagation.hpp"
 #include "acoustics/finite_difference_solver.hpp"
+#include "acoustics/receiver_recorder.hpp"
 #include "utils/snapshot_writer.hpp"
 #include <chrono>
 #include <print>
@@ -28,9 +29,8 @@ namespace starfwi {
 struct starpu_codelet forward_propagation_codelet = {
     .cpu_funcs = {forward_propagation_cpu},
     .cpu_funcs_name = {"forward_propagation_cpu"},
-    .nbuffers =
-        3, // velocity model (read) + shot data (read-write) + config (read)
-    .modes = {STARPU_R, STARPU_RW, STARPU_R},
+    .nbuffers = 6, // velocity, shot, config, receiver_x, receiver_y, receiver_z
+    .modes = {STARPU_R, STARPU_RW, STARPU_R, STARPU_R, STARPU_R, STARPU_R},
     .name = "forward_propagation",
     .color = 0xFF0000};
 
@@ -56,7 +56,13 @@ struct starpu_codelet forward_propagation_codelet = {
  * read-write)
  *                - buffers[2]: Task configuration (VARIABLE TaskConfig,
  * read-only)
- * @param cl_arg  Codelet argument (unused in current implementation)
+ *                - buffers[3]: Receiver X coordinates (VECTOR of floats,
+ * read-only)
+ *                - buffers[4]: Receiver Y coordinates (VECTOR of floats,
+ * read-only)
+ *                - buffers[5]: Receiver Z coordinates (VECTOR of floats,
+ * read-only)
+ * @param cl_arg  Codelet argument containing rank, hostname, verbose flag
  *
  * Note: This function is executed asynchronously by StarPU workers and may
  *       run on any available worker, potentially on different nodes in an
@@ -68,6 +74,11 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   float *velocity_data = (float *)STARPU_VECTOR_GET_PTR(buffers[0]);
   ShotData *shot = (ShotData *)STARPU_VARIABLE_GET_PTR(buffers[1]);
   TaskConfig *task_config = (TaskConfig *)STARPU_VARIABLE_GET_PTR(buffers[2]);
+
+  // Extract global receiver arrays
+  float *receiver_x = (float *)STARPU_VECTOR_GET_PTR(buffers[3]);
+  float *receiver_y = (float *)STARPU_VECTOR_GET_PTR(buffers[4]);
+  float *receiver_z = (float *)STARPU_VECTOR_GET_PTR(buffers[5]);
 
   // Extract rank and hostname from codelet argument
   CodeletArg *arg = (CodeletArg *)cl_arg;
@@ -112,6 +123,15 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   propagator.set_source_position(shot->source_x, shot->source_y,
                                  shot->source_z);
 
+  // Initialize receiver recorder with global receiver array
+  ReceiverRecorder *recorder = nullptr;
+  if (task_config->n_receivers > 0) {
+    recorder = new ReceiverRecorder(
+        receiver_x, receiver_y, receiver_z, task_config->n_receivers,
+        task_config->nt, task_config->nx, task_config->ny, task_config->nz,
+        task_config->dx, task_config->dy, task_config->dz);
+  }
+
   // Calculate progress reporting interval (10% of total timesteps)
   size_t progress_interval = task_config->nt / 10;
   if (progress_interval == 0) {
@@ -127,6 +147,11 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     // Propagate one time step
     propagator.step();
+
+    // Record at receivers if recorder is initialized
+    if (recorder) {
+      recorder->record_timestep(propagator, t);
+    }
 
     // Save wavefield snapshot if enabled
     if (task_config->snapshot_interval > 0 &&
@@ -158,13 +183,19 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     }
   }
 
+  // Copy recorded data back to shot structure
+  if (recorder) {
+    shot->synthetic_data = recorder->get_synthetic_data();
+    delete recorder;
+  }
+
   auto end_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
       end_time - start_time);
 
   if (verbose) {
-    std::println("[starfwi][{}][forward_propagation_cpu] Shot {} completed in "
-                 "{} seconds",
+    std::println("[starfwi][{}][forward_propagation_cpu] Shot {} progress: "
+                 "100/100. Completed in {} seconds",
                  hostname, shot->shot_id, duration.count() / 1000.0);
   }
 }

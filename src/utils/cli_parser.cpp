@@ -16,6 +16,7 @@ void print_usage(const char *program_name) {
   std::println(stderr, "  -v, --verbose              Enable verbose output");
   std::println(stderr, "  --snapshots N              Save wavefield snapshots every N timesteps");
   std::println(stderr, "  --snapshot-dir DIR         Output directory for snapshots (default: ./output)");
+  std::println(stderr, "  --shots N                  Number of shots to simulate (default: use SEG-Y data or 1)");
   std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
@@ -30,6 +31,7 @@ void print_usage(const char *program_name) {
   std::println(stderr, "  {} velocity_model.segy", program_name);
   std::println(stderr, "  {} -v velocity_model.segy 500", program_name);
   std::println(stderr, "  {} --snapshots 10 --snapshot-dir ./viz velocity_model.segy 100", program_name);
+  std::println(stderr, "  {} --shots 8 --snapshots 50 velocity_model.segy", program_name);
 }
 
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
@@ -68,6 +70,24 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
         return std::unexpected("--snapshot-dir requires an argument");
       }
       args.snapshot_dir = argv[++i];
+      continue;
+    }
+
+    if (arg == "--shots") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--shots requires an argument");
+      }
+      try {
+        args.num_shots = std::stoi(argv[++i]);
+        if (args.num_shots <= 0) {
+          return std::unexpected(
+              std::format("--shots must be a positive integer (got: {})",
+                          args.num_shots));
+        }
+      } catch (const std::exception &e) {
+        return std::unexpected(
+            std::format("Invalid --shots value: '{}'", argv[i]));
+      }
       continue;
     }
 

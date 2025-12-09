@@ -17,6 +17,7 @@ struct CliArgs {
   size_t snapshot_interval =
       0; ///< Save snapshots every N timesteps (0 = disabled)
   std::string snapshot_dir = ""; ///< Output directory for snapshots
+  int num_shots = -1; ///< Number of shots (-1 = use default or SEG-Y data)
 };
 
 /**

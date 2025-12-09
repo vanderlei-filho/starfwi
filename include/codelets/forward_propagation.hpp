@@ -8,6 +8,7 @@
 namespace starfwi {
 
 // POD struct for task parameters (safe to transfer via MPI)
+// Note: Must be POD-compatible for MPI transfer
 struct TaskConfig {
   size_t nx, ny, nz;        // Grid dimensions
   float dx, dy, dz;         // Grid spacing
@@ -15,6 +16,9 @@ struct TaskConfig {
   size_t nt;                // Number of time steps
   size_t snapshot_interval; // Save wavefield every N timesteps (0 = disabled)
   char snapshot_dir[256];   // Output directory for snapshots
+
+  // Global receiver array size (positions stored separately)
+  size_t n_receivers;       // Number of receivers in global array
 };
 
 // Codelet argument to pass MPI rank and host information
@@ -27,11 +31,17 @@ struct CodeletArg {
 // Structure to hold data for a single shot
 struct ShotData {
   size_t shot_id;
+
+  // Source information
   float source_x;
   float source_y;
   float source_z;
   std::vector<float> source_wavelet;
-  std::vector<float> receiver_data; // Output: recorded seismograms
+
+  // Recorded seismogram data at global receivers
+  // Note: Receiver positions are defined globally, not per-shot
+  std::vector<float> synthetic_data; // Synthetic seismograms: n_global_receivers × nt
+  std::vector<float> observed_data;  // Observed seismograms (for FWI)
 };
 
 // StarPU codelet for forward wave propagation
