@@ -2,6 +2,7 @@
 #include "utils/cli_parser.hpp"
 #include "utils/receiver_geometry.hpp"
 #include "utils/segy_loader.hpp"
+#include "utils/seismogram_io.hpp"
 #include "utils/snapshot_writer.hpp"
 #include "utils/wavelet.hpp"
 #include <algorithm>
@@ -209,6 +210,26 @@ int main(int argc, char **argv) {
     // Copy wavelet (all ranks need valid wavelet vector for StarPU
     // registration)
     shots[i].source_wavelet = base_wavelet;
+
+    // Load observed data if available and not generating observed data
+    // (FWI mode: load pre-computed observed data from true model)
+    if (!args.generate_observed && !args.observed_dir.empty()) {
+      std::string observed_file = starfwi::utils::SeismogramIO::generate_filename(
+          args.observed_dir, shots[i].shot_id);
+      starfwi::utils::SeismogramIO::Header header;
+      std::vector<float> observed_data;
+      auto load_result = starfwi::utils::SeismogramIO::load(observed_file, observed_data, header);
+      if (load_result) {
+        shots[i].observed_data = std::move(observed_data);
+        if (rank == 0 && args.verbose) {
+          std::println("[starfwi] Loaded observed data for shot {} from {}",
+                       shots[i].shot_id, observed_file);
+        }
+      } else if (rank == 0 && args.verbose) {
+        std::println("[starfwi] No observed data found for shot {} ({})",
+                     shots[i].shot_id, load_result.error());
+      }
+    }
   }
 
   // ========== STEP 5b: SETUP GLOBAL RECEIVER ARRAY ==========
@@ -337,6 +358,11 @@ int main(int argc, char **argv) {
   std::strncpy(task_config.snapshot_dir, args.snapshot_dir.c_str(), 255);
   task_config.snapshot_dir[255] = '\0';
   task_config.n_receivers = n_receivers;
+
+  // FWI options
+  task_config.generate_observed = args.generate_observed;
+  std::strncpy(task_config.observed_dir, args.observed_dir.c_str(), 255);
+  task_config.observed_dir[255] = '\0';
 
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,

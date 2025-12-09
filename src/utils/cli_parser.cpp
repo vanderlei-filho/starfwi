@@ -18,6 +18,10 @@ void print_usage(const char *program_name) {
   std::println(stderr, "  --snapshot-dir DIR         Output directory for snapshots (default: ./output)");
   std::println(stderr, "  --shots N                  Number of shots to simulate (default: use SEG-Y data or 1)");
   std::println(stderr, "");
+  std::println(stderr, "FWI Options:");
+  std::println(stderr, "  --generate-observed        Generate observed data from true model and save");
+  std::println(stderr, "  --observed-dir DIR         Directory for observed data (default: ./observed)");
+  std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
                "  segy_file_path   Path to SEG-Y velocity model file or "
@@ -32,14 +36,21 @@ void print_usage(const char *program_name) {
   std::println(stderr, "  {} -v velocity_model.segy 500", program_name);
   std::println(stderr, "  {} --snapshots 10 --snapshot-dir ./viz velocity_model.segy 100", program_name);
   std::println(stderr, "  {} --shots 8 --snapshots 50 velocity_model.segy", program_name);
+  std::println(stderr, "");
+  std::println(stderr, "FWI Workflow:");
+  std::println(stderr, "  # Step 1: Generate observed data from true model");
+  std::println(stderr, "  {} --generate-observed --observed-dir ./data true_model.segy", program_name);
+  std::println(stderr, "  # Step 2: Run FWI with initial model (loads observed from --observed-dir)");
+  std::println(stderr, "  {} --observed-dir ./data initial_model.segy", program_name);
 }
 
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
                                                        int rank) {
   CliArgs args;
 
-  // Default snapshot directory
+  // Default directories
   args.snapshot_dir = "./output";
+  args.observed_dir = "./observed";
 
   // Parse arguments
   int positional_count = 0;
@@ -88,6 +99,19 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
         return std::unexpected(
             std::format("Invalid --shots value: '{}'", argv[i]));
       }
+      continue;
+    }
+
+    if (arg == "--generate-observed") {
+      args.generate_observed = true;
+      continue;
+    }
+
+    if (arg == "--observed-dir") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--observed-dir requires an argument");
+      }
+      args.observed_dir = argv[++i];
       continue;
     }
 

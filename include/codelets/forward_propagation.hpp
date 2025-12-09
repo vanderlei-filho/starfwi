@@ -19,6 +19,10 @@ struct TaskConfig {
 
   // Global receiver array size (positions stored separately)
   size_t n_receivers;       // Number of receivers in global array
+
+  // FWI options
+  bool generate_observed;   // If true, save synthetic as observed data
+  char observed_dir[256];   // Directory for observed data
 };
 
 // Codelet argument to pass MPI rank and host information
@@ -42,6 +46,10 @@ struct ShotData {
   // Note: Receiver positions are defined globally, not per-shot
   std::vector<float> synthetic_data; // Synthetic seismograms: n_global_receivers × nt
   std::vector<float> observed_data;  // Observed seismograms (for FWI)
+
+  // FWI residuals and misfit (computed after forward propagation)
+  std::vector<float> residuals;      // Residuals: observed - synthetic (adjoint sources)
+  float misfit = 0.0f;               // L2 misfit value for this shot
 };
 
 // StarPU codelet for forward wave propagation

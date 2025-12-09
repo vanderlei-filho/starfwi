@@ -1,6 +1,8 @@
 #include "codelets/forward_propagation.hpp"
 #include "acoustics/finite_difference_solver.hpp"
+#include "acoustics/misfit.hpp"
 #include "acoustics/receiver_recorder.hpp"
+#include "utils/seismogram_io.hpp"
 #include "utils/snapshot_writer.hpp"
 #include <chrono>
 #include <print>
@@ -187,6 +189,54 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   if (recorder) {
     shot->synthetic_data = recorder->get_synthetic_data();
     delete recorder;
+  }
+
+  // Save seismogram as "observed" data if generating observed data
+  if (task_config->generate_observed && !shot->synthetic_data.empty()) {
+    utils::SeismogramIO::Header seis_header;
+    seis_header.shot_id = shot->shot_id;
+    seis_header.n_receivers = task_config->n_receivers;
+    seis_header.nt = task_config->nt;
+    seis_header.dt = task_config->dt;
+    seis_header.source_x = shot->source_x;
+    seis_header.source_y = shot->source_y;
+    seis_header.source_z = shot->source_z;
+
+    std::string filename = utils::SeismogramIO::generate_filename(
+        task_config->observed_dir, shot->shot_id);
+    auto result =
+        utils::SeismogramIO::save(filename, shot->synthetic_data, seis_header);
+    if (result) {
+      if (verbose) {
+        std::println(
+            "[starfwi][{}][forward_propagation_cpu] Saved observed data "
+            "for shot {} to {}",
+            hostname, shot->shot_id, filename);
+      }
+    } else {
+      std::println(stderr,
+                   "[starfwi][{}][forward_propagation_cpu] ERROR: Failed "
+                   "to save observed data: {}",
+                   hostname, result.error());
+    }
+  }
+
+  // Compute misfit and residuals if observed data is available
+  // The residuals will be used as adjoint sources for gradient computation
+  if (!shot->observed_data.empty() && !shot->synthetic_data.empty()) {
+    MisfitCalculator misfit_calc(task_config->n_receivers, task_config->nt);
+    shot->misfit =
+        misfit_calc.compute(shot->observed_data, shot->synthetic_data);
+    shot->residuals = misfit_calc.get_residuals();
+
+    if (verbose) {
+      float normalized =
+          misfit_calc.compute_normalized_misfit(shot->observed_data);
+      std::println(
+          "[starfwi][{}][forward_propagation_cpu] Shot {} misfit: {:.6e} "
+          "(normalized: {:.4f})",
+          hostname, shot->shot_id, shot->misfit, normalized);
+    }
   }
 
   auto end_time = std::chrono::high_resolution_clock::now();
