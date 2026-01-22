@@ -1,4 +1,6 @@
+#include "codelets/compute_misfit.hpp"
 #include "codelets/forward_propagation.hpp"
+#include "codelets/save_observed.hpp"
 #include "utils/cli_parser.hpp"
 #include "utils/receiver_geometry.hpp"
 #include "utils/segy_loader.hpp"
@@ -68,10 +70,10 @@ int main(int argc, char **argv) {
   MPI_Bcast(&snapshot_interval_local, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
   args.snapshot_interval = snapshot_interval_local;
 
-  // Broadcast num_iterations from rank 0 to all ranks
-  int n_iterations_local = args.num_iterations; // -1 if not specified
-  MPI_Bcast(&n_iterations_local, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  args.num_iterations = n_iterations_local;
+  // Broadcast num_timesteps from rank 0 to all ranks
+  int n_timesteps_local = args.num_timesteps; // -1 if not specified
+  MPI_Bcast(&n_timesteps_local, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  args.num_timesteps = n_timesteps_local;
 
   // ========== STEP 3: LOAD SEISMIC DATA FROM SEG-Y MODELS ==========
   // All ranks read the same input file (file should be accessible to all nodes)
@@ -119,11 +121,11 @@ int main(int argc, char **argv) {
   }
 
   // Override timesteps if specified via command line
-  if (args.num_iterations > 0) {
-    config.time.nt = args.num_iterations;
+  if (args.num_timesteps > 0) {
+    config.time.nt = args.num_timesteps;
     if (rank == 0 and args.verbose) {
       std::println("[starfwi] Timesteps (from command-line): {}",
-                   args.num_iterations);
+                   args.num_timesteps);
     }
   } else {
     config.time.nt = 1000;
@@ -214,11 +216,13 @@ int main(int argc, char **argv) {
     // Load observed data if available and not generating observed data
     // (FWI mode: load pre-computed observed data from true model)
     if (!args.generate_observed && !args.observed_dir.empty()) {
-      std::string observed_file = starfwi::utils::SeismogramIO::generate_filename(
-          args.observed_dir, shots[i].shot_id);
+      std::string observed_file =
+          starfwi::utils::SeismogramIO::generate_filename(args.observed_dir,
+                                                          shots[i].shot_id);
       starfwi::utils::SeismogramIO::Header header;
       std::vector<float> observed_data;
-      auto load_result = starfwi::utils::SeismogramIO::load(observed_file, observed_data, header);
+      auto load_result = starfwi::utils::SeismogramIO::load(
+          observed_file, observed_data, header);
       if (load_result) {
         shots[i].observed_data = std::move(observed_data);
         if (rank == 0 && args.verbose) {
@@ -392,43 +396,87 @@ int main(int argc, char **argv) {
   // ALL ranks submit ALL tasks (collective submission pattern for StarPU-MPI)
   // StarPU-MPI automatically executes each task on the rank that owns the RW
   // data
+  //
+  // Task DAG per shot:
+  //   forward_propagation (RW: shot)
+  //          ↓
+  //   save_observed (R: shot)        [if --generate-observed]
+  //          ↓
+  //   compute_misfit (RW: shot)      [if observed data loaded]
+  //
+  // Dependencies are implicit via data access modes on shot_handles[i]
+
   for (size_t i = 0; i < n_shots; ++i) {
     int owner_rank = i % size;
 
     // Create codelet argument with owner rank and hostname information
-    starfwi::CodeletArg *arg = new starfwi::CodeletArg();
-    std::memset(arg, 0, sizeof(starfwi::CodeletArg)); // Zero-initialize
-    arg->rank = owner_rank;
-    std::strncpy(arg->hostname,
-                 &all_processor_names[owner_rank * MPI_MAX_PROCESSOR_NAME],
-                 MPI_MAX_PROCESSOR_NAME - 1);
-    arg->hostname[MPI_MAX_PROCESSOR_NAME - 1] = '\0'; // Ensure null termination
-    arg->verbose = args.verbose;
+    // Note: Each task needs its own copy since StarPU may execute them at
+    // different times
+    auto create_codelet_arg = [&]() -> starfwi::CodeletArg * {
+      starfwi::CodeletArg *arg = new starfwi::CodeletArg();
+      std::memset(arg, 0, sizeof(starfwi::CodeletArg));
+      arg->rank = owner_rank;
+      std::strncpy(arg->hostname,
+                   &all_processor_names[owner_rank * MPI_MAX_PROCESSOR_NAME],
+                   MPI_MAX_PROCESSOR_NAME - 1);
+      arg->hostname[MPI_MAX_PROCESSOR_NAME - 1] = '\0';
+      arg->verbose = args.verbose;
+      return arg;
+    };
 
     if (args.verbose && rank == 0 && i == 0) {
-      std::println("[DEBUG] Submitting shot {} to rank {} on hostname: '{}', "
-                   "verbose={}, "
-                   "sizeof(CodeletArg)={}",
-                   i, owner_rank, arg->hostname, arg->verbose,
-                   sizeof(starfwi::CodeletArg));
+      std::println(
+          "[DEBUG] Submitting tasks for shot {} to rank {} on hostname: '{}'",
+          i, owner_rank,
+          &all_processor_names[owner_rank * MPI_MAX_PROCESSOR_NAME]);
     }
 
+    // Task 1: Forward propagation
     int ret = starpu_mpi_task_insert(
         MPI_COMM_WORLD, &starfwi::forward_propagation_codelet, STARPU_R,
-        velocity_handle,             // Velocity model (read-only, rank 0)
-        STARPU_RW, shot_handles[i],  // Shot data (read-write, owner_rank)
-        STARPU_R, config_handle,     // Task configuration (read-only, rank 0)
-        STARPU_R, receiver_x_handle, // Receiver X coords (read-only, rank 0)
-        STARPU_R, receiver_y_handle, // Receiver Y coords (read-only, rank 0)
-        STARPU_R, receiver_z_handle, // Receiver Z coords (read-only, rank 0)
-        STARPU_CL_ARGS, arg, sizeof(starfwi::CodeletArg), 0);
+        velocity_handle, STARPU_RW, shot_handles[i], STARPU_R, config_handle,
+        STARPU_R, receiver_x_handle, STARPU_R, receiver_y_handle, STARPU_R,
+        receiver_z_handle, STARPU_CL_ARGS, create_codelet_arg(),
+        sizeof(starfwi::CodeletArg), 0);
 
-    // TODO: improve error handling here
     if (ret != 0) {
-      std::println(stderr,
-                   "[starfwi][{}] ERROR: submitting MPI task for shot {} "
-                   "(error code: {})",
-                   node_name, i, ret);
+      std::println(
+          stderr,
+          "[starfwi][{}] ERROR: submitting forward_propagation for shot {} "
+          "(error code: {})",
+          node_name, i, ret);
+    }
+
+    // Task 2: Save observed data (only if --generate-observed)
+    if (args.generate_observed) {
+      ret = starpu_mpi_task_insert(
+          MPI_COMM_WORLD, &starfwi::save_observed_codelet, STARPU_RW,
+          shot_handles[i], STARPU_R, config_handle, STARPU_CL_ARGS,
+          create_codelet_arg(), sizeof(starfwi::CodeletArg), 0);
+
+      if (ret != 0) {
+        std::println(
+            stderr,
+            "[starfwi][{}] ERROR: submitting save_observed for shot {} "
+            "(error code: {})",
+            node_name, i, ret);
+      }
+    }
+
+    // Task 3: Compute misfit (only if observed data was loaded)
+    if (!shots[i].observed_data.empty()) {
+      ret = starpu_mpi_task_insert(
+          MPI_COMM_WORLD, &starfwi::compute_misfit_codelet, STARPU_RW,
+          shot_handles[i], STARPU_R, config_handle, STARPU_CL_ARGS,
+          create_codelet_arg(), sizeof(starfwi::CodeletArg), 0);
+
+      if (ret != 0) {
+        std::println(
+            stderr,
+            "[starfwi][{}] ERROR: submitting compute_misfit for shot {} "
+            "(error code: {})",
+            node_name, i, ret);
+      }
     }
   }
 

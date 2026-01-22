@@ -25,6 +25,8 @@ init-nodes: build ## spin up only test nodes (without starvz)
 
 .PHONY: test
 test: init-nodes ## build and run the standard test workload for starfwi
+	@rm -f ./.local_shared_volume/prof_files/*
+	@rm -rf ./.local_shared_volume/observed
 	@sleep 5
 	@$(CONTAINER_RUNTIME) exec -u mpiuser starfwi-test-node-1 \
 		mpirun \

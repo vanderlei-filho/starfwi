@@ -9,39 +9,50 @@ namespace starfwi {
 namespace utils {
 
 void print_usage(const char *program_name) {
-  std::println(stderr, "Usage: {} [options] <segy_file_path> [iterations]",
+  std::println(stderr, "Usage: {} [options] <segy_file_path> [timesteps]",
                program_name);
   std::println(stderr, "");
   std::println(stderr, "Options:");
   std::println(stderr, "  -v, --verbose              Enable verbose output");
-  std::println(stderr, "  --snapshots N              Save wavefield snapshots every N timesteps");
-  std::println(stderr, "  --snapshot-dir DIR         Output directory for snapshots (default: ./output)");
-  std::println(stderr, "  --shots N                  Number of shots to simulate (default: use SEG-Y data or 1)");
+  std::println(stderr, "  --snapshots N              Save wavefield snapshots "
+                       "every N timesteps");
+  std::println(stderr, "  --snapshot-dir DIR         Output directory for "
+                       "snapshots (default: ./output)");
+  std::println(stderr, "  --shots N                  Number of shots to "
+                       "simulate (default: use SEG-Y data or 1)");
   std::println(stderr, "");
   std::println(stderr, "FWI Options:");
-  std::println(stderr, "  --generate-observed        Generate observed data from true model and save");
-  std::println(stderr, "  --observed-dir DIR         Directory for observed data (default: ./observed)");
+  std::println(stderr, "  --generate-observed        Generate observed data "
+                       "from true model and save");
+  std::println(stderr, "  --observed-dir DIR         Directory for observed "
+                       "data (default: ./observed)");
   std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
                "  segy_file_path   Path to SEG-Y velocity model file or "
                ".tar.gz archive");
-  std::println(
-      stderr,
-      "  iterations       (Optional) Number of time steps to run (overrides "
-      "default/config)");
+  std::println(stderr, "  timesteps        (Optional) Number of time steps for "
+                       "wave propagation");
   std::println(stderr, "");
   std::println(stderr, "Examples:");
   std::println(stderr, "  {} velocity_model.segy", program_name);
   std::println(stderr, "  {} -v velocity_model.segy 500", program_name);
-  std::println(stderr, "  {} --snapshots 10 --snapshot-dir ./viz velocity_model.segy 100", program_name);
-  std::println(stderr, "  {} --shots 8 --snapshots 50 velocity_model.segy", program_name);
+  std::println(
+      stderr,
+      "  {} --snapshots 10 --snapshot-dir ./viz velocity_model.segy 100",
+      program_name);
+  std::println(stderr, "  {} --shots 8 --snapshots 50 velocity_model.segy",
+               program_name);
   std::println(stderr, "");
   std::println(stderr, "FWI Workflow:");
   std::println(stderr, "  # Step 1: Generate observed data from true model");
-  std::println(stderr, "  {} --generate-observed --observed-dir ./data true_model.segy", program_name);
-  std::println(stderr, "  # Step 2: Run FWI with initial model (loads observed from --observed-dir)");
-  std::println(stderr, "  {} --observed-dir ./data initial_model.segy", program_name);
+  std::println(stderr,
+               "  {} --generate-observed --observed-dir ./data true_model.segy",
+               program_name);
+  std::println(stderr, "  # Step 2: Run FWI with initial model (loads observed "
+                       "from --observed-dir)");
+  std::println(stderr, "  {} --observed-dir ./data initial_model.segy",
+               program_name);
 }
 
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
@@ -91,9 +102,8 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
       try {
         args.num_shots = std::stoi(argv[++i]);
         if (args.num_shots <= 0) {
-          return std::unexpected(
-              std::format("--shots must be a positive integer (got: {})",
-                          args.num_shots));
+          return std::unexpected(std::format(
+              "--shots must be a positive integer (got: {})", args.num_shots));
         }
       } catch (const std::exception &e) {
         return std::unexpected(
@@ -126,17 +136,17 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
       args.segy_filepath = arg;
       positional_count++;
     } else if (positional_count == 1) {
-      // Second positional: iterations
+      // Second positional: timesteps
       try {
-        args.num_iterations = std::stoi(arg);
-        if (args.num_iterations <= 0) {
+        args.num_timesteps = std::stoi(arg);
+        if (args.num_timesteps <= 0) {
           return std::unexpected(
-              std::format("iterations must be a positive integer (got: {})",
-                          args.num_iterations));
+              std::format("timesteps must be a positive integer (got: {})",
+                          args.num_timesteps));
         }
       } catch (const std::exception &e) {
         return std::unexpected(std::format(
-            "Invalid iterations parameter: '{}' ({})", arg, e.what()));
+            "Invalid timesteps parameter: '{}' ({})", arg, e.what()));
       }
       positional_count++;
     } else {

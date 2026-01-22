@@ -12,7 +12,7 @@ namespace utils {
  */
 struct CliArgs {
   std::string segy_filepath; ///< Path to SEG-Y file
-  int num_iterations = -1;   ///< Number of iterations (-1 = use default)
+  int num_timesteps = -1;    ///< Number of timesteps for wave propagation (-1 = use default)
   bool verbose = false;      ///< Enable verbose output
   size_t snapshot_interval =
       0; ///< Save snapshots every N timesteps (0 = disabled)

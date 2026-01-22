@@ -26,6 +26,8 @@ add_executable(starfwi
     src/acoustics/receiver_recorder.cpp
     src/acoustics/misfit.cpp
     src/codelets/forward_propagation.cpp
+    src/codelets/save_observed.cpp
+    src/codelets/compute_misfit.cpp
 )
 
 # Include directories
