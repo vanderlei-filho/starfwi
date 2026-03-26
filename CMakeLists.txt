@@ -14,9 +14,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(STARPU REQUIRED IMPORTED_TARGET starpu-1.4)
 pkg_check_modules(STARPUMPI REQUIRED IMPORTED_TARGET starpumpi-1.4)
 
-# Main executable
-add_executable(starfwi
-    src/main.cpp
+# Sources shared by both binaries
+set(STARFWI_COMMON_SOURCES
     src/utils/cli_parser.cpp
     src/utils/wavelet.cpp
     src/utils/segy_loader.cpp
@@ -26,31 +25,38 @@ add_executable(starfwi
     src/acoustics/receiver_recorder.cpp
     src/acoustics/misfit.cpp
     src/codelets/forward_propagation.cpp
+)
+
+# Helper function to apply common build settings
+function(starfwi_target_setup target)
+    target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_compile_options(${target} PRIVATE -fPIC)
+    target_link_options(${target} PRIVATE -rdynamic -Wl,--export-dynamic -Wl,-E)
+    target_link_libraries(${target} PRIVATE
+        PkgConfig::STARPUMPI
+        PkgConfig::STARPU
+        MPI::MPI_CXX
+        dl
+    )
+endfunction()
+
+# starfwi-modeling: forward-propagates true model, writes observed seismograms
+add_executable(starfwi-modeling
+    src/main_modeling.cpp
+    ${STARFWI_COMMON_SOURCES}
     src/codelets/save_observed.cpp
+)
+starfwi_target_setup(starfwi-modeling)
+
+# starfwi-fwi: loads observed data and runs the inversion loop
+add_executable(starfwi-fwi
+    src/main_fwi.cpp
+    ${STARFWI_COMMON_SOURCES}
     src/codelets/compute_misfit.cpp
+    src/codelets/backward_propagation.cpp
 )
-
-# Include directories
-target_include_directories(starfwi PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-# Compiler and linker options
-target_compile_options(starfwi PRIVATE -fPIC)
-target_link_options(starfwi PRIVATE
-    -rdynamic
-    -Wl,--export-dynamic
-    -Wl,-E
-)
-
-# Link libraries
-target_link_libraries(starfwi PRIVATE
-    PkgConfig::STARPUMPI
-    PkgConfig::STARPU
-    MPI::MPI_CXX
-    dl
-)
+starfwi_target_setup(starfwi-fwi)
 
 # Testing
 enable_testing()
-add_test(NAME LoadSegyModel COMMAND starfwi ${CMAKE_SOURCE_DIR}/data/example.segy)
+add_test(NAME LoadSegyModel COMMAND starfwi-modeling ${CMAKE_SOURCE_DIR}/data/example.segy)

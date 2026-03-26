@@ -20,8 +20,12 @@ struct CliArgs {
   int num_shots = -1; ///< Number of shots (-1 = use default or SEG-Y data)
 
   // FWI-related options
-  bool generate_observed = false;    ///< Generate observed data from true model
-  std::string observed_dir = "";     ///< Directory for observed data
+  std::string observed_dir = "./observed"; ///< Directory for observed seismogram files
+  float velocity_scale = 1.0f;            ///< Scale factor applied to velocity model before inversion
+
+  // Fault-tolerance options
+  std::string checkpoint_dir = "";   ///< Shared directory for persistent checkpoints (empty = disabled)
+  size_t checkpoint_interval = 0;    ///< Flush checkpoint every N shots (0 = disabled)
 };
 
 /**

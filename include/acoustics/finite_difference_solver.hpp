@@ -24,6 +24,10 @@ public:
   // Apply source term at source locations
   void apply_source(float amplitude, size_t source_index);
 
+  // Apply source at an arbitrary grid point (used to inject adjoint sources at
+  // receiver positions during backward propagation)
+  void apply_source_at(float amplitude, size_t ix, size_t iy, size_t iz);
+
   // Getters
   const std::vector<float> &get_pressure_field() const { return pressure_; }
 

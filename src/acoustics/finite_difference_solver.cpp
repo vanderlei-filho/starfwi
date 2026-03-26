@@ -351,4 +351,11 @@ void FiniteDifferenceSolver::apply_source(float amplitude,
   }
 }
 
+void FiniteDifferenceSolver::apply_source_at(float amplitude, size_t ix,
+                                              size_t iy, size_t iz) {
+  if (is_valid_index(ix, iy, iz)) {
+    pressure_[index(ix, iy, iz)] += amplitude;
+  }
+}
+
 } // namespace starfwi

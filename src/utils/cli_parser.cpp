@@ -22,10 +22,16 @@ void print_usage(const char *program_name) {
                        "simulate (default: use SEG-Y data or 1)");
   std::println(stderr, "");
   std::println(stderr, "FWI Options:");
-  std::println(stderr, "  --generate-observed        Generate observed data "
-                       "from true model and save");
   std::println(stderr, "  --observed-dir DIR         Directory for observed "
-                       "data (default: ./observed)");
+                       "seismogram files (default: ./observed)");
+  std::println(stderr, "  --velocity-scale F         Scale factor applied to "
+                       "velocity model before inversion (default: 1.0)");
+  std::println(stderr, "");
+  std::println(stderr, "Fault-Tolerance Options:");
+  std::println(stderr, "  --checkpoint-dir DIR       Shared filesystem path "
+                       "for persistent checkpoints");
+  std::println(stderr, "  --checkpoint-interval N    Flush checkpoint every N "
+                       "shots (default: 0 = disabled)");
   std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
@@ -45,14 +51,10 @@ void print_usage(const char *program_name) {
                program_name);
   std::println(stderr, "");
   std::println(stderr, "FWI Workflow:");
-  std::println(stderr, "  # Step 1: Generate observed data from true model");
-  std::println(stderr,
-               "  {} --generate-observed --observed-dir ./data true_model.segy",
-               program_name);
-  std::println(stderr, "  # Step 2: Run FWI with initial model (loads observed "
-                       "from --observed-dir)");
-  std::println(stderr, "  {} --observed-dir ./data initial_model.segy",
-               program_name);
+  std::println(stderr, "  Observed data is generated automatically from the "
+                       "loaded velocity model before inversion begins.");
+  std::println(stderr, "  A small perturbation is applied to the model to "
+                       "create a non-trivial starting point for inversion.");
 }
 
 std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
@@ -112,16 +114,48 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
       continue;
     }
 
-    if (arg == "--generate-observed") {
-      args.generate_observed = true;
+    if (arg == "--observed-dir") {
+      if (i + 1 >= argc)
+        return std::unexpected("--observed-dir requires an argument");
+      args.observed_dir = argv[++i];
       continue;
     }
 
-    if (arg == "--observed-dir") {
-      if (i + 1 >= argc) {
-        return std::unexpected("--observed-dir requires an argument");
+    if (arg == "--velocity-scale") {
+      if (i + 1 >= argc)
+        return std::unexpected("--velocity-scale requires an argument");
+      try {
+        args.velocity_scale = std::stof(argv[++i]);
+      } catch (const std::exception &) {
+        return std::unexpected(
+            std::format("Invalid --velocity-scale value: '{}'", argv[i]));
       }
-      args.observed_dir = argv[++i];
+      continue;
+    }
+
+    if (arg == "--checkpoint-dir") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--checkpoint-dir requires an argument");
+      }
+      args.checkpoint_dir = argv[++i];
+      continue;
+    }
+
+    if (arg == "--checkpoint-interval") {
+      if (i + 1 >= argc) {
+        return std::unexpected("--checkpoint-interval requires an argument");
+      }
+      try {
+        int val = std::stoi(argv[++i]);
+        if (val <= 0) {
+          return std::unexpected(std::format(
+              "--checkpoint-interval must be a positive integer (got: {})", val));
+        }
+        args.checkpoint_interval = static_cast<size_t>(val);
+      } catch (const std::exception &e) {
+        return std::unexpected(
+            std::format("Invalid --checkpoint-interval value: '{}'", argv[i]));
+      }
       continue;
     }
 

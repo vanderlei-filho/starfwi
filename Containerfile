@@ -69,25 +69,24 @@ RUN cd /tmp \
     && cd / \
     && rm -rf /tmp/fxt-*
 
-# Install StarPU with fully distributed MPI support
-RUN cd /tmp \
-    && wget https://files.inria.fr/starpu/starpu-1.4.7/starpu-1.4.7.tar.gz \
-    && tar xzf starpu-1.4.7.tar.gz \
-    && cd starpu-1.4.7 \
+# Install StarPU from local fork (injected via --build-context starpu=~/Code/starpu)
+COPY --from=starpu . /tmp/starpu/
+RUN cd /tmp/starpu \
+    && ./autogen.sh \
     && ./configure \
         --prefix=/usr/local \
         --disable-opencl \
         --disable-build-examples \
         --disable-build-doc \
         --enable-mpi \
+        --enable-mpi-ft \
         --with-fxt=/usr/local \
         --with-mpicc=/usr/local/bin/mpicc \
         --with-hwloc=/usr/local \
     && make -j$(nproc) \
     && make install \
     && ldconfig \
-    && cd / \
-    && rm -rf /tmp/starpu-*
+    && rm -rf /tmp/starpu
 
 # Setup passwordless SSH for MPI communications
 RUN cat > /etc/ssh/ssh_config <<EOF
@@ -133,8 +132,9 @@ RUN rm -rf build \
         -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     && cmake --build build \
-    && cp build/starfwi /usr/local/bin/starfwi \
-    && chmod +x /usr/local/bin/starfwi
+    && cp build/starfwi-modeling /usr/local/bin/starfwi-modeling \
+    && cp build/starfwi-fwi /usr/local/bin/starfwi-fwi \
+    && chmod +x /usr/local/bin/starfwi-modeling /usr/local/bin/starfwi-fwi
 
 # Note: Container runs as root to allow sshd to start
 # MPI jobs will run as mpiuser via 'podman exec -u mpiuser'

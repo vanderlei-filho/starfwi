@@ -1,6 +1,8 @@
+#include "acoustics/finite_difference_solver.hpp"
+#include "acoustics/receiver_recorder.hpp"
+#include "codelets/backward_propagation.hpp"
 #include "codelets/compute_misfit.hpp"
 #include "codelets/forward_propagation.hpp"
-#include "codelets/save_observed.hpp"
 #include "utils/cli_parser.hpp"
 #include "utils/receiver_geometry.hpp"
 #include "utils/segy_loader.hpp"
@@ -16,6 +18,14 @@
 #include <print>
 #include <starpu.h>
 #include <starpu_mpi.h>
+#include <starpu_mpi_ft.h>
+
+/* Backup-rank function required by the STARPU_VALUE checkpoint entry.
+ * Stored globally because the StarPU FT API takes a plain C function pointer. */
+static int g_cp_comm_size = 1;
+static int fwi_shots_backup_rank(int rank) {
+  return (rank + 1) % g_cp_comm_size;
+}
 
 int main(int argc, char **argv) {
   // ========== STEP 1: STARPU-MPI INITIALIZATION ==========
@@ -24,6 +34,7 @@ int main(int argc, char **argv) {
     std::println(stderr, "[starfwi] ERROR: Failed to initialize StarPU-MPI");
     return 1;
   }
+  starpu_mpi_checkpoint_init();
 
   int rank, size;
   starpu_mpi_comm_rank(MPI_COMM_WORLD, &rank);
@@ -63,7 +74,26 @@ int main(int argc, char **argv) {
   }
   starfwi::utils::CliArgs args = *parse_result;
 
-  // ========== STEP 2b: BROADCAST SHARED PARAMETERS FROM RANK 0 ==========
+  // ========== STEP 2b: CHECKPOINT RESTART DETECTION ==========
+  // Must happen before template registration and task submission.
+  int restart_flag = 0;
+  if (!args.checkpoint_dir.empty()) {
+    starpu_mpi_init_from_checkpoint(args.checkpoint_dir.c_str(), &restart_flag);
+    if (rank == 0) {
+      if (restart_flag) {
+        std::println("[starfwi] Persistent checkpoint found — resuming run "
+                     "(cp_id={}, cp_inst={}, old_n_ranks={})",
+                     starpu_mpi_checkpoint_get_restart_cp_id(),
+                     starpu_mpi_checkpoint_get_restart_cp_inst(),
+                     starpu_mpi_checkpoint_get_restart_n_ranks());
+      } else {
+        std::println("[starfwi] No checkpoint found in '{}' — starting fresh",
+                     args.checkpoint_dir);
+      }
+    }
+  }
+
+  // ========== STEP 2c: BROADCAST SHARED PARAMETERS FROM RANK 0 ==========
   // Broadcast snapshot_interval from rank 0 to ensure consistency
   // (snapshot_dir can remain different per rank for distributed storage)
   size_t snapshot_interval_local = args.snapshot_interval;
@@ -213,27 +243,6 @@ int main(int argc, char **argv) {
     // registration)
     shots[i].source_wavelet = base_wavelet;
 
-    // Load observed data if available and not generating observed data
-    // (FWI mode: load pre-computed observed data from true model)
-    if (!args.generate_observed && !args.observed_dir.empty()) {
-      std::string observed_file =
-          starfwi::utils::SeismogramIO::generate_filename(args.observed_dir,
-                                                          shots[i].shot_id);
-      starfwi::utils::SeismogramIO::Header header;
-      std::vector<float> observed_data;
-      auto load_result = starfwi::utils::SeismogramIO::load(
-          observed_file, observed_data, header);
-      if (load_result) {
-        shots[i].observed_data = std::move(observed_data);
-        if (rank == 0 && args.verbose) {
-          std::println("[starfwi] Loaded observed data for shot {} from {}",
-                       shots[i].shot_id, observed_file);
-        }
-      } else if (rank == 0 && args.verbose) {
-        std::println("[starfwi] No observed data found for shot {} ({})",
-                     shots[i].shot_id, load_result.error());
-      }
-    }
   }
 
   // ========== STEP 5b: SETUP GLOBAL RECEIVER ARRAY ==========
@@ -321,6 +330,52 @@ int main(int argc, char **argv) {
     }
   }
 
+  // ========== STEP 5c: GENERATE OBSERVED DATA (PREPROCESSING) ==========
+  // Each rank forward-propagates ALL shots with the true velocity model and
+  // stores the resulting seismograms as observed data in memory. All ranks
+  // process all shots so that the StarPU task submission condition
+  // (!observed_data.empty()) is identical on every rank (required for
+  // StarPU-MPI collective task submission).
+  if (rank == 0) {
+    std::println("[starfwi] Generating observed data from true velocity model "
+                 "({} shots × {} timesteps)...",
+                 n_shots, config.time.nt);
+  }
+  {
+    SimulationConfig true_config = config;
+    for (size_t i = 0; i < n_shots; ++i) {
+      FiniteDifferenceSolver solver(true_config);
+      solver.initialize();
+      solver.set_source_position(shots[i].source_x, shots[i].source_y,
+                                 shots[i].source_z);
+      ReceiverRecorder recorder(receivers.x.data(), receivers.y.data(),
+                                receivers.z.data(), n_receivers,
+                                config.time.nt, config.grid.nx, config.grid.ny,
+                                config.grid.nz, config.grid.dx, config.grid.dy,
+                                config.grid.dz);
+      for (size_t t = 0; t < config.time.nt; ++t) {
+        if (t < shots[i].source_wavelet.size())
+          solver.apply_source(shots[i].source_wavelet[t], shots[i].shot_id);
+        solver.step();
+        recorder.record_timestep(solver, t);
+      }
+      shots[i].observed_data = recorder.get_synthetic_data();
+    }
+  }
+  if (rank == 0) {
+    std::println("[starfwi] Observed data generation complete.");
+  }
+
+  // ========== STEP 5d: PERTURB VELOCITY MODEL ==========
+  // Apply a uniform −5 % perturbation to the velocity model so the inversion
+  // starts from a model that differs from the true model, producing a non-zero
+  // misfit and a meaningful gradient on the first iteration.
+  for (float &v : config.velocity_model.data)
+    v *= 0.95f;
+  if (rank == 0) {
+    std::println("[starfwi] Applied −5% velocity perturbation to starting model.");
+  }
+
   // ========== STEP 6: REGISTER DATA WITH STARPU ==========
   // All ranks have loaded the velocity model, so we can register it directly
   size_t n_velocity = config.grid.nx * config.grid.ny * config.grid.nz;
@@ -363,11 +418,6 @@ int main(int argc, char **argv) {
   task_config.snapshot_dir[255] = '\0';
   task_config.n_receivers = n_receivers;
 
-  // FWI options
-  task_config.generate_observed = args.generate_observed;
-  std::strncpy(task_config.observed_dir, args.observed_dir.c_str(), 255);
-  task_config.observed_dir[255] = '\0';
-
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,
                                 (uintptr_t)&task_config,
@@ -388,6 +438,66 @@ int main(int argc, char **argv) {
   std::println("[starfwi][{}] Data registration with StarPU completed",
                node_name);
 
+  // ========== STEP 6b: CHECKPOINT TEMPLATE REGISTRATION ==========
+  // Register the velocity model and a shot-progress counter so they can be
+  // flushed to shared storage and restored after a spot preemption.
+  g_cp_comm_size = size;
+  starpu_mpi_checkpoint_template_t cp_template = nullptr;
+  int shots_completed = 0; // global progress counter (same on all ranks)
+
+  if (!args.checkpoint_dir.empty()) {
+    starpu_mpi_checkpoint_set_storage_path(args.checkpoint_dir.c_str());
+
+    // velocity_handle is owned by rank 0; back it up on rank 1 (or self if
+    // running single-process)
+    int vel_backup_rank = (size > 1) ? 1 : 0;
+
+    starpu_mpi_checkpoint_template_register(
+        &cp_template, /*cp_id=*/1, /*domain=*/0,
+        STARPU_R, velocity_handle, vel_backup_rank,
+        STARPU_VALUE, &shots_completed, sizeof(int),
+            (starpu_mpi_tag_t)1000, fwi_shots_backup_rank,
+        0);
+
+    // ---- Restore from checkpoint (elastic or same-size restart) ----
+    if (restart_flag) {
+      int cp_id        = starpu_mpi_checkpoint_get_restart_cp_id();
+      int cp_inst      = starpu_mpi_checkpoint_get_restart_cp_inst();
+      int old_n_ranks  = starpu_mpi_checkpoint_get_restart_n_ranks();
+
+      // Velocity model: stored by old rank 0, tag 0.
+      // Rank 0 always restores it; StarPU-MPI will distribute as needed.
+      if (rank == 0) {
+        if (starpu_mpi_checkpoint_restore_handle(cp_id, cp_inst,
+                                                 /*old_rank=*/0, /*tag=*/0,
+                                                 velocity_handle) != 0) {
+          std::println(stderr,
+                       "[starfwi] WARNING: could not restore velocity handle "
+                       "from checkpoint");
+        }
+      }
+
+      // shots_completed: each old rank stored its own copy under tag 1000.
+      // On elastic restart map: new rank R reads from old rank R % old_n_ranks.
+      int old_rank = (old_n_ranks > 0) ? (rank % old_n_ranks) : 0;
+      int restored = 0;
+      if (starpu_mpi_checkpoint_restore_value(cp_id, cp_inst, old_rank,
+                                              /*tag=*/1000, &restored,
+                                              sizeof(int)) == 0) {
+        shots_completed = restored;
+      }
+      // All ranks agree on shots_completed — use the maximum across ranks so
+      // that even if counts differ after elastic resize we always skip ahead.
+      MPI_Allreduce(MPI_IN_PLACE, &shots_completed, 1, MPI_INT, MPI_MAX,
+                    MPI_COMM_WORLD);
+
+      if (rank == 0) {
+        std::println("[starfwi] State restored — resuming from shot {} of {}",
+                     shots_completed, n_shots);
+      }
+    }
+  }
+
   // Synchronize all ranks before starting timer
   starpu_mpi_barrier(MPI_COMM_WORLD);
   double total_start_time = starpu_timing_now();
@@ -406,7 +516,8 @@ int main(int argc, char **argv) {
   //
   // Dependencies are implicit via data access modes on shot_handles[i]
 
-  for (size_t i = 0; i < n_shots; ++i) {
+  size_t shots_at_resume = (size_t)shots_completed; // fixed offset for interval arithmetic
+  for (size_t i = (size_t)shots_completed; i < n_shots; ++i) {
     int owner_rank = i % size;
 
     // Create codelet argument with owner rank and hostname information
@@ -447,36 +558,49 @@ int main(int argc, char **argv) {
           node_name, i, ret);
     }
 
-    // Task 2: Save observed data (only if --generate-observed)
-    if (args.generate_observed) {
-      ret = starpu_mpi_task_insert(
-          MPI_COMM_WORLD, &starfwi::save_observed_codelet, STARPU_RW,
-          shot_handles[i], STARPU_R, config_handle, STARPU_CL_ARGS,
-          create_codelet_arg(), sizeof(starfwi::CodeletArg), 0);
+    // Task 2: Compute misfit between synthetic and observed seismograms.
+    ret = starpu_mpi_task_insert(
+        MPI_COMM_WORLD, &starfwi::compute_misfit_codelet, STARPU_RW,
+        shot_handles[i], STARPU_R, config_handle, STARPU_CL_ARGS,
+        create_codelet_arg(), sizeof(starfwi::CodeletArg), 0);
 
-      if (ret != 0) {
-        std::println(
-            stderr,
-            "[starfwi][{}] ERROR: submitting save_observed for shot {} "
-            "(error code: {})",
-            node_name, i, ret);
-      }
+    if (ret != 0) {
+      std::println(
+          stderr,
+          "[starfwi][{}] ERROR: submitting compute_misfit for shot {} "
+          "(error code: {})",
+          node_name, i, ret);
     }
 
-    // Task 3: Compute misfit (only if observed data was loaded)
-    if (!shots[i].observed_data.empty()) {
-      ret = starpu_mpi_task_insert(
-          MPI_COMM_WORLD, &starfwi::compute_misfit_codelet, STARPU_RW,
-          shot_handles[i], STARPU_R, config_handle, STARPU_CL_ARGS,
-          create_codelet_arg(), sizeof(starfwi::CodeletArg), 0);
+    // Task 3: Backward (adjoint) propagation — computes per-shot gradient.
+    // Depends on Task 2 via STARPU_RW on shot_handles[i].
+    ret = starpu_mpi_task_insert(
+        MPI_COMM_WORLD, &starfwi::backward_propagation_codelet, STARPU_R,
+        velocity_handle, STARPU_RW, shot_handles[i], STARPU_R, config_handle,
+        STARPU_R, receiver_x_handle, STARPU_R, receiver_y_handle, STARPU_R,
+        receiver_z_handle, STARPU_CL_ARGS, create_codelet_arg(),
+        sizeof(starfwi::CodeletArg), 0);
 
-      if (ret != 0) {
-        std::println(
-            stderr,
-            "[starfwi][{}] ERROR: submitting compute_misfit for shot {} "
-            "(error code: {})",
-            node_name, i, ret);
+    if (ret != 0) {
+      std::println(
+          stderr,
+          "[starfwi][{}] ERROR: submitting backward_propagation for shot {} "
+          "(error code: {})",
+          node_name, i, ret);
+    }
+
+    // ---- Periodic checkpoint flush ----
+    // After every checkpoint_interval shots, drain the task graph and persist
+    // the current state to shared storage so a spot-preemption restart can
+    // resume from here rather than from the beginning.
+    if (cp_template && args.checkpoint_interval > 0 &&
+        ((i + 1 - shots_at_resume) % args.checkpoint_interval == 0)) {
+      shots_completed = static_cast<int>(i + 1);
+      if (rank == 0) {
+        std::println("[starfwi] Flushing checkpoint after shot {} of {}",
+                     shots_completed, n_shots);
       }
+      starpu_mpi_checkpoint_flush_to_storage(cp_template);
     }
   }
 
@@ -527,6 +651,7 @@ int main(int argc, char **argv) {
     std::println("====================================");
   }
 
+  starpu_mpi_checkpoint_shutdown();
   starpu_mpi_shutdown();
   return 0;
 }
