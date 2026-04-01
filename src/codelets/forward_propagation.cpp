@@ -3,6 +3,9 @@
 #include "acoustics/receiver_recorder.hpp"
 #include "utils/snapshot_writer.hpp"
 #include <chrono>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <print>
 
 namespace starfwi {
@@ -132,6 +135,27 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
         task_config->dx, task_config->dy, task_config->dz);
   }
 
+  const size_t grid_size = task_config->nx * task_config->ny * task_config->nz;
+  // wavefield_storage: 0=MEMORY, 1=DISK, 2=NONE (modeling path — no backward needed)
+  const bool use_memory = (task_config->wavefield_storage == 0);
+  const bool use_disk   = (task_config->wavefield_storage == 1);
+
+  // Pre-allocate snapshot storage
+  std::ofstream wf_out;
+  if (use_memory) {
+    shot->pressure_snapshots.resize(task_config->nt * grid_size);
+  } else if (use_disk) {
+    std::string wf_file = std::format("{}/fwd_shot_{}.bin",
+                                       task_config->wavefield_dir, shot->shot_id);
+    std::filesystem::create_directories(task_config->wavefield_dir);
+    wf_out.open(wf_file, std::ios::binary | std::ios::trunc);
+    if (!wf_out)
+      std::println(stderr,
+                   "[starfwi][{}][forward_propagation_cpu] WARNING: cannot open "
+                   "wavefield file '{}' — backward propagation will fail",
+                   hostname, wf_file);
+  }
+
   // Calculate progress reporting interval (10% of total timesteps)
   size_t progress_interval = task_config->nt / 10;
   if (progress_interval == 0) {
@@ -151,6 +175,16 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     // Record at receivers if recorder is initialized
     if (recorder) {
       recorder->record_timestep(propagator, t);
+    }
+
+    // Save forward pressure snapshot for adjoint (backward) propagation
+    const std::vector<float> &p = propagator.get_pressure_field();
+    if (use_memory) {
+      std::copy(p.begin(), p.end(),
+                shot->pressure_snapshots.begin() + t * grid_size);
+    } else if (use_disk && wf_out) {
+      wf_out.write(reinterpret_cast<const char *>(p.data()),
+                   grid_size * sizeof(float));
     }
 
     // Save wavefield snapshot if enabled
@@ -188,6 +222,9 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     shot->synthetic_data = recorder->get_synthetic_data();
     delete recorder;
   }
+
+  if (use_disk && wf_out)
+    wf_out.close();
 
   auto end_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(

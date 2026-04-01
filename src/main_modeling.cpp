@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
     std::println("[starfwi-modeling] Number of shots: {}", n_shots);
 
   if (config.source.frequency <= 0.0f)
-    config.source.frequency = 20.0f;
+    config.source.frequency = 200.0f;
 
   std::vector<float> base_wavelet = starfwi::generate_ricker_wavelet(
       config.source.frequency, config.time.dt, config.time.nt);
@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
     } else {
       shots[i].source_x = shot_x_start + i * shot_spacing;
       shots[i].source_y = is_2d_model ? 0.0f : config.grid.dy * config.grid.ny / 2.0f;
-      shots[i].source_z = 40.0f;
+      shots[i].source_z = 12.5f;
     }
     shots[i].source_wavelet = base_wavelet;
   }
@@ -195,6 +195,8 @@ int main(int argc, char **argv) {
   task_config.n_receivers = n_receivers;
   std::strncpy(task_config.observed_dir, args.observed_dir.c_str(), 255);
   task_config.observed_dir[255] = '\0';
+  task_config.wavefield_storage = 2; // NONE — modeling never runs backward propagation
+  task_config.wavefield_dir[0] = '\0';
 
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,

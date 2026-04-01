@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mpi.h>
 #include <print>
 #include <starpu.h>
@@ -151,7 +153,7 @@ int main(int argc, char **argv) {
     std::println("[starfwi-fwi] Number of shots: {}", n_shots);
 
   if (config.source.frequency <= 0.0f)
-    config.source.frequency = 20.0f;
+    config.source.frequency = 200.0f;
 
   std::vector<float> base_wavelet = starfwi::generate_ricker_wavelet(
       config.source.frequency, config.time.dt, config.time.nt);
@@ -172,7 +174,7 @@ int main(int argc, char **argv) {
     } else {
       shots[i].source_x = shot_x_start + i * shot_spacing;
       shots[i].source_y = is_2d_model ? 0.0f : config.grid.dy * config.grid.ny / 2.0f;
-      shots[i].source_z = 40.0f;
+      shots[i].source_z = 12.5f;
     }
     shots[i].source_wavelet = base_wavelet;
   }
@@ -249,6 +251,10 @@ int main(int argc, char **argv) {
   task_config.snapshot_dir[255] = '\0';
   task_config.n_receivers = n_receivers;
   task_config.observed_dir[0] = '\0'; // not used in FWI binary
+  task_config.wavefield_storage =
+      (args.wavefield_storage == starfwi::utils::CliArgs::WavefieldStorage::MEMORY) ? 0 : 1;
+  std::strncpy(task_config.wavefield_dir, args.wavefield_dir.c_str(), 255);
+  task_config.wavefield_dir[255] = '\0';
 
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,
@@ -300,74 +306,156 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ========== STEP 7: SUBMIT STARPU TASKS ==========
+  // ========== STEP 7: OUTER FWI ITERATION LOOP ==========
   starpu_mpi_barrier(MPI_COMM_WORLD);
   double t_start = starpu_timing_now();
 
-  size_t shots_at_resume = (size_t)shots_completed;
-  for (size_t i = (size_t)shots_completed; i < n_shots; ++i) {
-    int owner_rank = i % size;
+  std::vector<float> full_gradient(n_velocity, 0.0f);
 
-    auto make_arg = [&]() -> starfwi::CodeletArg * {
-      auto *arg = new starfwi::CodeletArg();
-      std::memset(arg, 0, sizeof(starfwi::CodeletArg));
-      arg->rank = owner_rank;
-      std::strncpy(arg->hostname,
-                   &all_processor_names[owner_rank * MPI_MAX_PROCESSOR_NAME],
-                   MPI_MAX_PROCESSOR_NAME - 1);
-      arg->verbose = args.verbose;
-      return arg;
-    };
+  for (int iter = 0; iter < args.num_iterations; ++iter) {
+    if (rank == 0)
+      std::println("\n[starfwi-fwi] ===== Iteration {}/{} =====",
+                   iter + 1, args.num_iterations);
 
-    // Task 1: Forward propagation
-    ret = starpu_mpi_task_insert(
-        MPI_COMM_WORLD, &starfwi::forward_propagation_codelet,
-        STARPU_R, velocity_handle, STARPU_RW, shot_handles[i],
-        STARPU_R, config_handle, STARPU_R, receiver_x_handle,
-        STARPU_R, receiver_y_handle, STARPU_R, receiver_z_handle,
-        STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
-    if (ret != 0)
-      std::println(stderr,
-                   "[starfwi-fwi][{}] ERROR: forward_propagation shot {} ({})",
-                   node_name, i, ret);
+    // -------- Submit tasks for every shot --------
+    size_t shots_at_resume = (size_t)shots_completed;
+    for (size_t i = (size_t)shots_completed; i < n_shots; ++i) {
+      int owner_rank = i % size;
 
-    // Task 2: Compute misfit
-    ret = starpu_mpi_task_insert(
-        MPI_COMM_WORLD, &starfwi::compute_misfit_codelet,
-        STARPU_RW, shot_handles[i], STARPU_R, config_handle,
-        STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
-    if (ret != 0)
-      std::println(stderr,
-                   "[starfwi-fwi][{}] ERROR: compute_misfit shot {} ({})",
-                   node_name, i, ret);
+      auto make_arg = [&]() -> starfwi::CodeletArg * {
+        auto *arg = new starfwi::CodeletArg();
+        std::memset(arg, 0, sizeof(starfwi::CodeletArg));
+        arg->rank = owner_rank;
+        std::strncpy(arg->hostname,
+                     &all_processor_names[owner_rank * MPI_MAX_PROCESSOR_NAME],
+                     MPI_MAX_PROCESSOR_NAME - 1);
+        arg->verbose = args.verbose;
+        return arg;
+      };
 
-    // Task 3: Backward (adjoint) propagation
-    ret = starpu_mpi_task_insert(
-        MPI_COMM_WORLD, &starfwi::backward_propagation_codelet,
-        STARPU_R, velocity_handle, STARPU_RW, shot_handles[i],
-        STARPU_R, config_handle, STARPU_R, receiver_x_handle,
-        STARPU_R, receiver_y_handle, STARPU_R, receiver_z_handle,
-        STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
-    if (ret != 0)
-      std::println(stderr,
-                   "[starfwi-fwi][{}] ERROR: backward_propagation shot {} ({})",
-                   node_name, i, ret);
+      // Task 1: Forward propagation
+      ret = starpu_mpi_task_insert(
+          MPI_COMM_WORLD, &starfwi::forward_propagation_codelet,
+          STARPU_R, velocity_handle, STARPU_RW, shot_handles[i],
+          STARPU_R, config_handle, STARPU_R, receiver_x_handle,
+          STARPU_R, receiver_y_handle, STARPU_R, receiver_z_handle,
+          STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
+      if (ret != 0)
+        std::println(stderr,
+                     "[starfwi-fwi][{}] ERROR: forward_propagation shot {} ({})",
+                     node_name, i, ret);
 
-    // Periodic checkpoint flush
-    if (cp_template && args.checkpoint_interval > 0 &&
-        ((i + 1 - shots_at_resume) % args.checkpoint_interval == 0)) {
-      shots_completed = static_cast<int>(i + 1);
+      // Task 2: Compute misfit
+      ret = starpu_mpi_task_insert(
+          MPI_COMM_WORLD, &starfwi::compute_misfit_codelet,
+          STARPU_RW, shot_handles[i], STARPU_R, config_handle,
+          STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
+      if (ret != 0)
+        std::println(stderr,
+                     "[starfwi-fwi][{}] ERROR: compute_misfit shot {} ({})",
+                     node_name, i, ret);
+
+      // Task 3: Backward (adjoint) propagation
+      ret = starpu_mpi_task_insert(
+          MPI_COMM_WORLD, &starfwi::backward_propagation_codelet,
+          STARPU_R, velocity_handle, STARPU_RW, shot_handles[i],
+          STARPU_R, config_handle, STARPU_R, receiver_x_handle,
+          STARPU_R, receiver_y_handle, STARPU_R, receiver_z_handle,
+          STARPU_CL_ARGS, make_arg(), sizeof(starfwi::CodeletArg), 0);
+      if (ret != 0)
+        std::println(stderr,
+                     "[starfwi-fwi][{}] ERROR: backward_propagation shot {} ({})",
+                     node_name, i, ret);
+
+      // Periodic checkpoint flush
+      if (cp_template && args.checkpoint_interval > 0 &&
+          ((i + 1 - shots_at_resume) % args.checkpoint_interval == 0)) {
+        shots_completed = static_cast<int>(i + 1);
+        if (rank == 0)
+          std::println("[starfwi-fwi] Flushing checkpoint after shot {} of {}",
+                       shots_completed, n_shots);
+        starpu_mpi_checkpoint_flush_to_storage(cp_template);
+      }
+    }
+    // All shots submitted for this iteration — reset counter for next
+    shots_completed = 0;
+
+    // -------- Wait for all tasks --------
+    if (args.verbose)
+      std::println("[starfwi-fwi][{}] Waiting for tasks (iter {})...",
+                   node_name, iter + 1);
+    starpu_task_wait_for_all();
+
+    // -------- Gradient and misfit reduction --------
+    std::vector<float> local_gradient(n_velocity, 0.0f);
+    float local_misfit = 0.0f;
+
+    for (size_t i = 0; i < n_shots; ++i) {
+      if ((int)(i % size) != rank) continue;
+      starpu_data_acquire(shot_handles[i], STARPU_R);
+      if (!shots[i].gradient.empty()) {
+        for (size_t j = 0; j < n_velocity; ++j)
+          local_gradient[j] += shots[i].gradient[j];
+      }
+      local_misfit += shots[i].misfit;
+      starpu_data_release(shot_handles[i]);
+    }
+
+    MPI_Allreduce(local_gradient.data(), full_gradient.data(),
+                  static_cast<int>(n_velocity), MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+
+    float total_misfit = 0.0f;
+    MPI_Reduce(&local_misfit, &total_misfit, 1, MPI_FLOAT, MPI_SUM, 0,
+               MPI_COMM_WORLD);
+
+    if (rank == 0) {
+      float grad_norm_sq = 0.0f;
+      for (float g : full_gradient) grad_norm_sq += g * g;
+      std::println("[starfwi-fwi] Iter {:3d}: misfit={:.6e}  |grad|={:.6e}",
+                   iter + 1, total_misfit, std::sqrt(grad_norm_sq));
+    }
+
+    // -------- Velocity model update (gradient descent) --------
+    // Normalize gradient by its max absolute value so that step_length has
+    // physically meaningful units: max velocity change (m/s) per iteration.
+    float grad_max = 0.0f;
+    for (float g : full_gradient)
+      grad_max = std::max(grad_max, std::abs(g));
+
+    if (grad_max > 0.0f) {
+      // All ranks apply the same update (full_gradient is identical everywhere
+      // after MPI_Allreduce). We acquire the StarPU handle to notify it that
+      // the underlying buffer is being modified.
+      starpu_data_acquire(velocity_handle, STARPU_RW);
+      const float scale = args.step_length / grad_max;
+      for (size_t j = 0; j < n_velocity; ++j) {
+        config.velocity_model.data[j] -= scale * full_gradient[j];
+        // Keep velocities physically meaningful (>= 100 m/s)
+        if (config.velocity_model.data[j] < 100.0f)
+          config.velocity_model.data[j] = 100.0f;
+      }
+      starpu_data_release(velocity_handle);
       if (rank == 0)
-        std::println("[starfwi-fwi] Flushing checkpoint after shot {} of {}",
-                     shots_completed, n_shots);
-      starpu_mpi_checkpoint_flush_to_storage(cp_template);
+        std::println("[starfwi-fwi]          max_grad={:.6e}  scale={:.6e}  "
+                     "max_dv={:.2f} m/s",
+                     grad_max, scale, args.step_length);
     }
   }
 
-  // ========== STEP 8: WAIT FOR COMPLETION ==========
-  std::println("[starfwi-fwi][{}] Waiting for tasks...", node_name);
-  starpu_task_wait_for_all();
-  std::println("[starfwi-fwi][{}] Done.", node_name);
+  // ========== STEP 8: SAVE FINAL INVERTED MODEL ==========
+  if (rank == 0) {
+    std::filesystem::create_directories(args.snapshot_dir);
+    std::string out_model = args.snapshot_dir + "/inverted_velocity.bin";
+    std::ofstream ofs(out_model, std::ios::binary);
+    if (ofs) {
+      ofs.write(reinterpret_cast<const char *>(config.velocity_model.data.data()),
+                static_cast<std::streamsize>(n_velocity * sizeof(float)));
+      std::println("[starfwi-fwi] Inverted model written to '{}'", out_model);
+    } else {
+      std::println(stderr, "[starfwi-fwi] WARNING: could not write inverted model to '{}'",
+                   out_model);
+    }
+  }
 
   // ========== STEP 9: CLEANUP ==========
   for (auto &h : shot_handles) starpu_data_unregister(h);
@@ -385,7 +473,7 @@ int main(int argc, char **argv) {
 
   if (rank == 0) {
     std::println("\n====================================");
-    std::println("FWI inversion complete!");
+    std::println("FWI inversion complete ({} iterations)!", args.num_iterations);
     std::println("Total time: {:.3f} s", max_us / 1e6);
     std::println("====================================");
   }

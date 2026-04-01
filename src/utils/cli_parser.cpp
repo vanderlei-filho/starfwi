@@ -26,12 +26,20 @@ void print_usage(const char *program_name) {
                        "seismogram files (default: ./observed)");
   std::println(stderr, "  --velocity-scale F         Scale factor applied to "
                        "velocity model before inversion (default: 1.0)");
+  std::println(stderr, "  --iterations N             Number of outer FWI "
+                       "iterations (default: 10)");
+  std::println(stderr, "  --step-length F            Max velocity update per "
+                       "iteration in m/s (gradient is normalized, default: 50)");
   std::println(stderr, "");
   std::println(stderr, "Fault-Tolerance Options:");
   std::println(stderr, "  --checkpoint-dir DIR       Shared filesystem path "
                        "for persistent checkpoints");
   std::println(stderr, "  --checkpoint-interval N    Flush checkpoint every N "
                        "shots (default: 0 = disabled)");
+  std::println(stderr, "  --wavefield-storage MODE   Forward wavefield storage "
+                       "strategy: memory or disk (default: disk)");
+  std::println(stderr, "  --wavefield-dir DIR        Directory for temporary "
+                       "wavefield files when using disk strategy (default: /tmp)");
   std::println(stderr, "");
   std::println(stderr, "Arguments:");
   std::println(stderr,
@@ -138,6 +146,54 @@ std::expected<CliArgs, std::string> parse_command_line(int argc, char **argv,
         return std::unexpected("--checkpoint-dir requires an argument");
       }
       args.checkpoint_dir = argv[++i];
+      continue;
+    }
+
+    if (arg == "--wavefield-storage") {
+      if (i + 1 >= argc)
+        return std::unexpected("--wavefield-storage requires an argument");
+      std::string mode = argv[++i];
+      if (mode == "memory")
+        args.wavefield_storage = CliArgs::WavefieldStorage::MEMORY;
+      else if (mode == "disk")
+        args.wavefield_storage = CliArgs::WavefieldStorage::DISK;
+      else
+        return std::unexpected(
+            std::format("Invalid --wavefield-storage value: '{}' (expected: memory or disk)", mode));
+      continue;
+    }
+
+    if (arg == "--wavefield-dir") {
+      if (i + 1 >= argc)
+        return std::unexpected("--wavefield-dir requires an argument");
+      args.wavefield_dir = argv[++i];
+      continue;
+    }
+
+    if (arg == "--iterations") {
+      if (i + 1 >= argc)
+        return std::unexpected("--iterations requires an argument");
+      try {
+        args.num_iterations = std::stoi(argv[++i]);
+        if (args.num_iterations <= 0)
+          return std::unexpected(std::format(
+              "--iterations must be a positive integer (got: {})", args.num_iterations));
+      } catch (const std::exception &) {
+        return std::unexpected(
+            std::format("Invalid --iterations value: '{}'", argv[i]));
+      }
+      continue;
+    }
+
+    if (arg == "--step-length") {
+      if (i + 1 >= argc)
+        return std::unexpected("--step-length requires an argument");
+      try {
+        args.step_length = std::stof(argv[++i]);
+      } catch (const std::exception &) {
+        return std::unexpected(
+            std::format("Invalid --step-length value: '{}'", argv[i]));
+      }
       continue;
     }
 

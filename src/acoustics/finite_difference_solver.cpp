@@ -265,14 +265,18 @@ void FiniteDifferenceSolver::apply_boundary_conditions() {
     }
   }
 
-  // Zero out front and back boundaries (y-direction)
-  // These are at iy=0 and iy=ny-1 for all (ix, iz)
-  for (size_t iz = 0; iz < nz_; ++iz) {
-    size_t base_z = iz * stride_z;
-    for (size_t ix = 0; ix < nx_; ++ix) {
-      pressure_new_[base_z + ix] = 0.0f; // Front (iy=0)
-      pressure_new_[base_z + (ny_ - 1) * stride_y + ix] =
-          0.0f; // Back (iy=ny-1)
+  // Zero out front and back boundaries (y-direction).
+  // For 2D models (ny_==1) there is no y-extent, so this loop must be skipped:
+  // with ny_=1, iy=0 and iy=ny-1=0 are the same plane and stride_z==stride_y,
+  // so the loop would zero every cell in the grid.
+  if (ny_ > 1) {
+    for (size_t iz = 0; iz < nz_; ++iz) {
+      size_t base_z = iz * stride_z;
+      for (size_t ix = 0; ix < nx_; ++ix) {
+        pressure_new_[base_z + ix] = 0.0f; // Front (iy=0)
+        pressure_new_[base_z + (ny_ - 1) * stride_y + ix] =
+            0.0f; // Back (iy=ny-1)
+      }
     }
   }
 
@@ -318,15 +322,13 @@ void FiniteDifferenceSolver::swap_time_levels() {
  * @param z Source z-coordinate in meters
  */
 void FiniteDifferenceSolver::set_source_position(float x, float y, float z) {
-  // Convert physical coordinates to grid indices
-  source_ix_ = static_cast<size_t>(x / dx_);
-  source_iy_ = static_cast<size_t>(y / dy_);
-  source_iz_ = static_cast<size_t>(z / dz_);
-
-  // Clamp to valid grid range
-  source_ix_ = std::min(source_ix_, nx_ - 1);
-  source_iy_ = std::min(source_iy_, ny_ - 1);
-  source_iz_ = std::min(source_iz_, nz_ - 1);
+  // Convert physical coordinates to grid indices (clamp to valid range).
+  // Y: for 2D models (ny==1 or dy==0) skip division to avoid 0/0=NaN.
+  source_ix_ = std::min(static_cast<size_t>(x / dx_), nx_ - 1);
+  source_iy_ = (ny_ == 1 || dy_ <= 0.0f)
+                   ? 0
+                   : std::min(static_cast<size_t>(y / dy_), ny_ - 1);
+  source_iz_ = std::min(static_cast<size_t>(z / dz_), nz_ - 1);
 
   source_position_set_ = true;
 }

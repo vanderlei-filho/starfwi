@@ -250,3 +250,32 @@ StarFWI computes one complete forward+adjoint pass per shot (the full StarPU tas
 | Elastic restart | **Yes** — `starpu_mpi_checkpoint_restore_handle` restores data handles even when `n_ranks` changes between failure and restart | **No** — recovery restores the same number of ranks as before the failure |
 
 This is the central research contribution of StarFWI. StarPU's fault-tolerance layer supports **elastic restart**: the job can resume on whatever nodes are available after a failure, not just the original set. DeLIA does not provide this capability.
+
+### Validation against Mamute
+
+Once StarFWI's velocity update and iteration loop are implemented, results can be validated against Mamute on a shared synthetic test case.
+
+**Recommended test model: 2D Gaussian perturbation**
+
+- **True model**: constant background velocity (e.g. 2500 m/s) with a Gaussian anomaly at the centre
+- **Initial model**: flat constant velocity (no anomaly)
+- **Expected result**: FWI should recover the Gaussian anomaly; the inverted model from both codes should converge to the same ground truth
+
+Mamute generates all its data programmatically via Python scripts in `scripts/generate_data/`. No external dataset is required.
+
+**Workflow:**
+
+1. Generate the model with Mamute's `velocity.py` (type `gaussian_pertubation`) and run Mamute's two-phase pipeline to obtain `v-final.bin`.
+2. Convert the same model to SEG-Y for StarFWI (note the format difference: Mamute uses float64 in z×y×x layout; StarFWI uses float32 in x×z layout after SEG-Y load).
+3. Run StarFWI's two-phase pipeline and extract the inverted velocity field.
+4. Compare the two results with Mamute's `scripts/max_diff.py` (relative percentage difference).
+
+**Key format differences to account for:**
+
+| | StarFWI | Mamute |
+|---|---|---|
+| Velocity file format | SEG-Y | Raw binary |
+| Scalar type | float32 | float64 |
+| Array layout | x fast, z slow (`data[ix + nx*iz]`) | z fast, then y, then x (`data[iz + nz*(iy + ny*ix)]`) |
+| Source wavelet | Ricker (generated at runtime) | Ricker stored in `source.bin` |
+| Observed data | One `.bin` file per shot (custom header) | One `dobs_i.bin` per shot (raw binary) |

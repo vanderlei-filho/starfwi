@@ -26,6 +26,15 @@ struct CliArgs {
   // Fault-tolerance options
   std::string checkpoint_dir = "";   ///< Shared directory for persistent checkpoints (empty = disabled)
   size_t checkpoint_interval = 0;    ///< Flush checkpoint every N shots (0 = disabled)
+
+  // Forward wavefield storage strategy (used by backward propagation)
+  enum class WavefieldStorage { MEMORY, DISK };
+  WavefieldStorage wavefield_storage = WavefieldStorage::DISK;
+  std::string wavefield_dir = "/tmp"; ///< Directory for temporary wavefield files (DISK strategy)
+
+  // Inversion control
+  int num_iterations = 10;   ///< Number of outer FWI iterations
+  float step_length  = 50.0f; ///< Max velocity change per iteration (m/s), gradient is normalized
 };
 
 /**

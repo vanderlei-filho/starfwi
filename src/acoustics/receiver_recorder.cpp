@@ -47,27 +47,37 @@ float ReceiverRecorder::interpolate_at_point(
 
   // Convert physical coordinates to grid coordinates
   float fx = x / dx_;
-  float fy = y / dy_;
   float fz = z / dz_;
 
   // Get integer indices (floor)
   size_t ix0 = static_cast<size_t>(std::floor(fx));
-  size_t iy0 = static_cast<size_t>(std::floor(fy));
   size_t iz0 = static_cast<size_t>(std::floor(fz));
 
   // Get fractional parts for interpolation weights
   float wx = fx - ix0;
-  float wy = fy - iy0;
   float wz = fz - iz0;
 
   // Clamp indices to valid range
   size_t ix1 = std::min(ix0 + 1, nx_ - 1);
-  size_t iy1 = std::min(iy0 + 1, ny_ - 1);
   size_t iz1 = std::min(iz0 + 1, nz_ - 1);
 
   ix0 = std::min(ix0, nx_ - 1);
-  iy0 = std::min(iy0, ny_ - 1);
   iz0 = std::min(iz0, nz_ - 1);
+
+  // Y dimension: for 2D models (ny==1 or dy==0) skip division to avoid 0/0=NaN
+  size_t iy0, iy1;
+  float wy;
+  if (ny_ == 1 || dy_ <= 0.0f) {
+    iy0 = 0;
+    iy1 = 0;
+    wy = 0.0f;
+  } else {
+    float fy = y / dy_;
+    iy0 = static_cast<size_t>(std::floor(fy));
+    wy = fy - iy0;
+    iy1 = std::min(iy0 + 1, ny_ - 1);
+    iy0 = std::min(iy0, ny_ - 1);
+  }
 
   // Trilinear interpolation
   // Get values at 8 surrounding grid points

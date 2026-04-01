@@ -22,6 +22,12 @@ struct TaskConfig {
 
   // Directory for observed seismogram files (used by save_observed codelet)
   char observed_dir[256];
+
+  // Forward wavefield storage strategy for backward propagation:
+  //   0 = MEMORY — keep all nt snapshots in ShotData::pressure_snapshots
+  //   1 = DISK   — write snapshots to a temp file in wavefield_dir
+  int wavefield_storage;
+  char wavefield_dir[256];
 };
 
 // Codelet argument to pass MPI rank and host information
@@ -54,6 +60,10 @@ struct ShotData {
   // Accumulated via cross-correlation imaging condition during backward propagation.
   // Must be summed across all shots (MPI reduction) to get the full gradient.
   std::vector<float> gradient;
+
+  // Forward pressure snapshots — populated by forward_propagation_cpu (MEMORY strategy)
+  // and consumed + cleared by backward_propagation_cpu. Layout: [t * grid_size + i].
+  std::vector<float> pressure_snapshots;
 };
 
 // StarPU codelet for forward wave propagation

@@ -362,6 +362,22 @@ SEGYLoader::load_segy_model(const std::string &filepath, bool verbose) {
     }
   }
 
+  // Transpose velocity model from trace-major [ix][iz] to depth-major [iz][ix]
+  // SEG-Y stores data as: data[ix * nz + iz] (trace outer, sample inner)
+  // FD solver expects:    data[ix + nx * iz] (x fast, z slow)
+  // These differ when nx != nz (e.g. Marmousi2: nx=13601, nz=2801).
+  {
+    size_t nx = config_.grid.nx;
+    size_t nz = config_.grid.nz;
+    std::vector<float> transposed(nx * nz);
+    for (size_t ix = 0; ix < nx; ++ix) {
+      for (size_t iz = 0; iz < nz; ++iz) {
+        transposed[ix + nx * iz] = config_.velocity_model.data[ix * nz + iz];
+      }
+    }
+    config_.velocity_model.data = std::move(transposed);
+  }
+
   config_.velocity_model.is_loaded = true;
 
   return {};
