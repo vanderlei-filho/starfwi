@@ -26,6 +26,10 @@ extern struct starpu_codelet backward_propagation_codelet;
 
 void backward_propagation_cpu(void *buffers[], void *cl_arg);
 
+#ifdef STARPU_USE_CUDA
+void backward_propagation_cuda(void *buffers[], void *cl_arg);
+#endif
+
 } // namespace starfwi
 
 #endif // BACKWARD_PROPAGATION_HPP

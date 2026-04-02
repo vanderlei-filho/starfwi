@@ -7,6 +7,7 @@
 #include <format>
 #include <fstream>
 #include <print>
+#include <sys/sysinfo.h>
 
 namespace starfwi {
 
@@ -30,12 +31,28 @@ namespace starfwi {
  *   - Handle data transfers in distributed environments
  */
 struct starpu_codelet forward_propagation_codelet = {
-    .cpu_funcs = {forward_propagation_cpu},
+    .cpu_funcs      = {forward_propagation_cpu},
+#ifdef STARPU_USE_CUDA
+    .cuda_funcs     = {forward_propagation_cuda},
+    .cuda_flags     = {STARPU_CUDA_ASYNC},
+#endif
     .cpu_funcs_name = {"forward_propagation_cpu"},
     .nbuffers = 6, // velocity, shot, config, receiver_x, receiver_y, receiver_z
-    .modes = {STARPU_R, STARPU_RW, STARPU_R, STARPU_R, STARPU_R, STARPU_R},
-    .name = "forward_propagation",
-    .color = 0xFF0000};
+    .modes    = {STARPU_R, STARPU_RW, STARPU_R, STARPU_R, STARPU_R, STARPU_R},
+    // Keep shot (buf 1) and task_config (buf 2) in host RAM even on CUDA workers.
+    // ShotData / TaskConfig contain std::vector members with heap-allocated data;
+    // StarPU cannot meaningfully serialize them to GPU memory. STARPU_SPECIFIC_NODE_CPU
+    // forces these buffers to stay in CPU-accessible memory so STARPU_VARIABLE_GET_PTR
+    // returns a valid host pointer from both CPU and CUDA codelet functions.
+    .specific_nodes = 1,
+    .nodes    = {STARPU_SPECIFIC_NODE_LOCAL,  // buf 0: velocity → GPU for CUDA
+                 STARPU_SPECIFIC_NODE_CPU,    // buf 1: shot     → always host RAM
+                 STARPU_SPECIFIC_NODE_CPU,    // buf 2: config   → always host RAM
+                 STARPU_SPECIFIC_NODE_LOCAL,  // buf 3: recv_x   → GPU for CUDA
+                 STARPU_SPECIFIC_NODE_LOCAL,  // buf 4: recv_y   → GPU for CUDA
+                 STARPU_SPECIFIC_NODE_LOCAL}, // buf 5: recv_z   → GPU for CUDA
+    .name     = "forward_propagation",
+    .color    = 0xFF0000};
 
 /**
  * @brief CPU implementation of forward wave propagation for a single shot
@@ -136,9 +153,38 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   }
 
   const size_t grid_size = task_config->nx * task_config->ny * task_config->nz;
-  // wavefield_storage: 0=MEMORY, 1=DISK, 2=NONE (modeling path — no backward needed)
-  const bool use_memory = (task_config->wavefield_storage == 0);
-  const bool use_disk   = (task_config->wavefield_storage == 1);
+
+  // Auto-select snapshot storage strategy.
+  // NONE (wavefield_storage==2) is always respected — the modeling path never
+  // needs snapshots. Otherwise, we prefer host RAM and only fall back to disk
+  // when free memory is insufficient (< 70% of currently free physical RAM).
+  int actual_storage = -1; // -1 = NONE
+  if (task_config->wavefield_storage != 2) {
+    const size_t snap_bytes = task_config->nt * grid_size * sizeof(float);
+    struct sysinfo si{};
+    sysinfo(&si);
+    const size_t free_ram = static_cast<size_t>(si.freeram) * si.mem_unit;
+
+    if (snap_bytes < free_ram * 7 / 10) {
+      actual_storage = 0; // MEMORY
+      if (verbose)
+        std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
+                     "in host RAM ({} MB needed, {} MB free)",
+                     hostname, shot->shot_id,
+                     snap_bytes >> 20, (free_ram * 7 / 10) >> 20);
+    } else {
+      actual_storage = 1; // DISK
+      std::println(stderr,
+                   "[starfwi][{}][forward_propagation_cpu] Shot {}: insufficient "
+                   "host RAM for snapshots ({} MB needed, {} MB free) — using disk",
+                   hostname, shot->shot_id,
+                   snap_bytes >> 20, (free_ram * 7 / 10) >> 20);
+    }
+  }
+  shot->wavefield_storage_actual = actual_storage;
+
+  const bool use_memory = (actual_storage == 0);
+  const bool use_disk   = (actual_storage == 1);
 
   // Pre-allocate snapshot storage
   std::ofstream wf_out;

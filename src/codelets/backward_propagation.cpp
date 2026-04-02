@@ -12,10 +12,23 @@
 namespace starfwi {
 
 struct starpu_codelet backward_propagation_codelet = {
-    .cpu_funcs = {backward_propagation_cpu},
+    .cpu_funcs      = {backward_propagation_cpu},
+#ifdef STARPU_USE_CUDA
+    .cuda_funcs     = {backward_propagation_cuda},
+    .cuda_flags     = {STARPU_CUDA_ASYNC},
+#endif
     .cpu_funcs_name = {"backward_propagation_cpu"},
     .nbuffers = 6, // velocity, shot, config, receiver_x, receiver_y, receiver_z
     .modes = {STARPU_R, STARPU_RW, STARPU_R, STARPU_R, STARPU_R, STARPU_R},
+    // Same reasoning as forward_propagation_codelet: keep shot (buf 1) and
+    // task_config (buf 2) in host RAM. See forward_propagation.cpp for details.
+    .specific_nodes = 1,
+    .nodes = {STARPU_SPECIFIC_NODE_LOCAL,  // buf 0: velocity → GPU for CUDA
+              STARPU_SPECIFIC_NODE_CPU,    // buf 1: shot     → always host RAM
+              STARPU_SPECIFIC_NODE_CPU,    // buf 2: config   → always host RAM
+              STARPU_SPECIFIC_NODE_LOCAL,  // buf 3: recv_x   → GPU for CUDA
+              STARPU_SPECIFIC_NODE_LOCAL,  // buf 4: recv_y   → GPU for CUDA
+              STARPU_SPECIFIC_NODE_LOCAL}, // buf 5: recv_z   → GPU for CUDA
     .name = "backward_propagation",
     .color = 0x00FF00};
 
@@ -95,7 +108,10 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   //   codelet. We use a 3-slot rolling buffer (p_hi, p_mid, p_lo) and
   //   read one new snapshot from disk per adjoint step.
   // ================================================================
-  const bool use_memory = (task_config->wavefield_storage == 0);
+  // Use the storage mode actually chosen by the forward codelet at runtime.
+  // This may differ from task_config->wavefield_storage when auto-detection
+  // overrode the requested mode based on available GPU/host memory.
+  const bool use_memory = (shot->wavefield_storage_actual == 0);
 
   // DISK: open wavefield file and set up rolling buffer
   std::ifstream wf_in;
@@ -114,7 +130,7 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
       return;
     }
   } else {
-    // DISK: open the file written by forward_propagation_cpu
+    // DISK: open the file written by the forward codelet
     wf_file = std::format("{}/fwd_shot_{}.bin",
                            task_config->wavefield_dir, shot->shot_id);
     wf_in.open(wf_file, std::ios::binary);

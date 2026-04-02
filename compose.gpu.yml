@@ -1,0 +1,13 @@
+# GPU override — applied on top of compose.yml when GPU_SUPPORT=true.
+# Passes the local NVIDIA GPU into both nodes via CDI (requires nvidia-ctk cdi generate).
+# Node2 gets a CUDA worker; node1 stays CPU-only (STARPU_NCUDA controlled in appfiles).
+services:
+  node1:
+    image: starfwi-test-image-gpu
+    devices:
+      - nvidia.com/gpu=all
+
+  node2:
+    image: starfwi-test-image-gpu
+    devices:
+      - nvidia.com/gpu=all

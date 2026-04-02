@@ -61,16 +61,29 @@ struct ShotData {
   // Must be summed across all shots (MPI reduction) to get the full gradient.
   std::vector<float> gradient;
 
-  // Forward pressure snapshots — populated by forward_propagation_cpu (MEMORY strategy)
-  // and consumed + cleared by backward_propagation_cpu. Layout: [t * grid_size + i].
+  // Forward pressure snapshots — populated by forward_propagation (MEMORY strategy)
+  // and consumed + cleared by backward_propagation. Layout: [t * grid_size + i].
   std::vector<float> pressure_snapshots;
+
+  // Actual snapshot storage mode chosen at runtime by the forward codelet.
+  // May differ from task_config->wavefield_storage when auto-detection overrides
+  // the requested mode based on available GPU/host memory.
+  //   0 = MEMORY (data in pressure_snapshots)
+  //   1 = DISK   (data in a binary file)
+  //  -1 = NONE / not yet set (modeling path, no backward needed)
+  int wavefield_storage_actual = -1;
 };
 
 // StarPU codelet for forward wave propagation
 extern struct starpu_codelet forward_propagation_codelet;
 
-// The actual computation function called by StarPU
+// CPU implementation
 void forward_propagation_cpu(void *buffers[], void *cl_arg);
+
+// CUDA implementation — only available when built with CUDA support
+#ifdef STARPU_USE_CUDA
+void forward_propagation_cuda(void *buffers[], void *cl_arg);
+#endif
 
 } // namespace starfwi
 

@@ -6,22 +6,32 @@ IMAGE_NAME := starfwi-test-image
 CONTAINER_NAME := starfwi
 STARVZ_SHELL := starvz-shell
 
+# GPU support: pass GPU_SUPPORT=true to enable CUDA in the image and expose the GPU to containers
+GPU_SUPPORT ?= false
+ifeq ($(GPU_SUPPORT),true)
+IMAGE_NAME := starfwi-test-image-gpu
+COMPOSE_FILES := -f compose.yml -f compose.gpu.yml
+else
+COMPOSE_FILES := -f compose.yml
+endif
+
 .DEFAULT_GOAL := help
 .PHONY: help
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## build starfwi + local StarPU fork (../starpu) into the container image
+build: ## build starfwi + local StarPU fork (../starpu) into the container image  [GPU_SUPPORT=true]
 	@$(CONTAINER_RUNTIME) build \
+		--build-arg GPU_SUPPORT=$(GPU_SUPPORT) \
 		--build-context starpu=../starpu \
 		-f Containerfile \
 		-t $(IMAGE_NAME) \
 		.
 
 .PHONY: start
-start: build ## spin up the two MPI test nodes (node1 + node2)
-	@$(COMPOSE_CMD) up -d --force-recreate node1 node2
+start: build ## spin up the two MPI test nodes (node1 + node2)  [GPU_SUPPORT=true]
+	@$(COMPOSE_CMD) $(COMPOSE_FILES) up -d --force-recreate node1 node2
 
 .PHONY: test
 test: start ## run the full FWI test: modeling (true model → observed data) then inversion (2 MPI ranks: node1=2 workers, node2=3 workers)
@@ -66,9 +76,9 @@ trace: build ## convert FxT traces with starpu_fxt_tool and render plots with St
 		starvz -2 .
 
 .PHONY: kill
-kill: ## stop and remove all running containers
-	$(COMPOSE_CMD) down
+kill: ## stop and remove all running containers  [GPU_SUPPORT=true]
+	$(COMPOSE_CMD) $(COMPOSE_FILES) down
 
 .PHONY: clean
-clean: kill ## stop containers and delete the container image
+clean: kill ## stop containers and delete the container image  [GPU_SUPPORT=true]
 	$(CONTAINER_RUNTIME) rmi $(IMAGE_NAME)
