@@ -212,13 +212,15 @@ The adjoint state method needs the forward pressure field `p[x,t]` while running
 
 The Revolve algorithm (Griewank & Walther, 2000) is the theoretically optimal approach: it minimises total recomputation for a given memory budget. Mamute queries available system RAM at runtime and sets the number of checkpoint buffers accordingly.
 
-**StarFWI** uses a single fixed strategy: **time-reversal backward reconstruction**. The acoustic wave equation is time-symmetric (no dissipation), so the same FD stencil runs both forward and backward:
+**StarFWI** uses **three-tier snapshot storage** with runtime auto-detection. The forward codelet stores all `nt` pressure snapshots and the backward codelet reads them back in reverse order to apply the cross-correlation imaging condition. The storage tier is chosen at the start of each shot based on available memory:
 
-```
-p[t-1] = 2·p[t] - p[t+1] + (c·dt)²·∇²p[t]
-```
+| Tier | Condition | Storage | Access pattern |
+|---|---|---|---|
+| **GPU VRAM** (CUDA only) | `snap_bytes < 80% free VRAM` | `d_all_snapshots` (device) | D2D per step; one bulk D2H after loop |
+| **Host RAM** | `snap_bytes < 70% free RAM` | `shot->pressure_snapshots` | Per-step D2H (CUDA) or direct write (CPU) |
+| **Disk** | Neither fits | `fwd_shot_<id>.bin` on shared FS | Per-step write (fwd); sequential read (bwd) |
 
-Only 3 rolling states are needed, giving O(grid) memory without any disk I/O. The trade-off is that absorbing boundary condition errors accumulate slightly as reconstruction proceeds further back in time. Mamute's `CHECKPOINTING` mode avoids this by recomputing the forward field exactly from a stored checkpoint.
+The chosen tier is recorded in `ShotData::wavefield_storage_actual` by the forward codelet and read by the backward codelet. This gives O(nt × grid) peak memory usage in the best case (GPU VRAM), falling back to disk I/O when memory is insufficient. Mamute's `CHECKPOINTING` mode (Revolve algorithm) offers a theoretically better O(√nt × grid) trade-off but requires recomputation; StarFWI avoids recomputation at the cost of higher peak storage.
 
 ### FD stencil and physics
 
@@ -236,11 +238,17 @@ Mamute's 8th-order stencil suppresses numerical dispersion, which matters for re
 
 | | StarFWI | Mamute |
 |---|---|---|
-| Method | Not implemented — gradient is computed but no velocity update loop | L-BFGS-B (limited-memory quasi-Newton with bound constraints) |
-| Line search | — | Wolfe conditions |
+| Method | Gradient descent with max-norm scaling | L-BFGS-B (limited-memory quasi-Newton with bound constraints) |
+| Line search | Fixed step length (`--step-length`) | Wolfe conditions |
 | Gradient preconditioning | — | Optional Bessel/Laplace smoothing; near-surface zeroing |
 
-StarFWI computes one complete forward+adjoint pass per shot (the full StarPU task graph), but does not iterate toward convergence. The inversion loop and model update are future work.
+StarFWI runs a full multi-iteration inversion loop. Each iteration submits the complete forward → misfit → adjoint task graph for all shots, reduces the per-shot gradients via `MPI_Allreduce`, and updates the velocity model:
+
+```
+v[j] -= (step_length / max|grad|) * grad[j]
+```
+
+Velocities are clamped to a minimum of 100 m/s. The step length is a fixed user parameter; no line search is performed.
 
 ### Fault tolerance
 
@@ -253,7 +261,7 @@ This is the central research contribution of StarFWI. StarPU's fault-tolerance l
 
 ### Validation against Mamute
 
-Once StarFWI's velocity update and iteration loop are implemented, results can be validated against Mamute on a shared synthetic test case.
+StarFWI's inversion loop and velocity update are implemented. Results can be validated against Mamute on a shared synthetic test case.
 
 **Recommended test model: 2D Gaussian perturbation**
 

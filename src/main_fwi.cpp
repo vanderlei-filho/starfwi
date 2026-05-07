@@ -12,8 +12,10 @@
 #include "utils/snapshot_writer.hpp"
 #include "utils/wavelet.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -29,6 +31,54 @@ static int fwi_shots_backup_rank(int rank) {
   return (rank + 1) % g_cp_comm_size;
 }
 
+// Set by SIGUSR1 when the IMDS watchdog detects a spot interruption notice.
+// Checked collectively at each shot boundary to trigger an emergency checkpoint.
+static std::atomic<bool> g_interrupt_requested{false};
+static void handle_sigusr1(int) { g_interrupt_requested.store(true); }
+
+// Returns true if any rank has received a spot interruption signal.
+// Must be called collectively by all ranks.
+static bool check_spot_interrupt(MPI_Comm comm) {
+  int local = g_interrupt_requested.load() ? 1 : 0;
+  int global = 0;
+  MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, comm);
+  return global != 0;
+}
+
+// Returns the total size in bytes of all regular files under `dir`.
+// Returns 0 if the directory does not exist.
+static uintptr_t dir_size_bytes(const std::string &dir) {
+  namespace fs = std::filesystem;
+  uintptr_t total = 0;
+  std::error_code ec;
+  for (const auto &entry : fs::recursive_directory_iterator(dir, ec))
+    if (entry.is_regular_file(ec))
+      total += entry.file_size(ec);
+  return total;
+}
+
+// Flush a checkpoint, measure wall time and bytes written, and print a
+// [METRIC] line on rank 0 so the experiment runner can parse it.
+static void flush_checkpoint_with_metrics(starpu_mpi_checkpoint_template_t tmpl,
+                                          const std::string &cp_dir,
+                                          int rank) {
+  uintptr_t size_before = dir_size_bytes(cp_dir);
+  auto t0 = std::chrono::steady_clock::now();
+
+  starpu_mpi_checkpoint_flush_to_storage(tmpl);
+
+  auto t1 = std::chrono::steady_clock::now();
+  uintptr_t size_after = dir_size_bytes(cp_dir);
+
+  if (rank == 0) {
+    long long flush_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    double cp_mb = static_cast<double>(size_after - size_before) / (1024.0 * 1024.0);
+    std::println("[METRIC] flush_time_ms={} checkpoint_size_mb={:.2f}",
+                 flush_ms, cp_mb);
+  }
+}
+
 int main(int argc, char **argv) {
   // ========== STEP 1: STARPU-MPI INITIALIZATION ==========
   int ret = starpu_mpi_init_conf(&argc, &argv, 1, MPI_COMM_WORLD, NULL);
@@ -37,6 +87,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   starpu_mpi_checkpoint_init();
+  signal(SIGUSR1, handle_sigusr1);
 
   int rank, size;
   starpu_mpi_comm_rank(MPI_COMM_WORLD, &rank);
@@ -312,15 +363,30 @@ int main(int argc, char **argv) {
 
   std::vector<float> full_gradient(n_velocity, 0.0f);
 
-  for (int iter = 0; iter < args.num_iterations; ++iter) {
+  bool interrupted = false;
+  for (int iter = 0; iter < args.num_iterations && !interrupted; ++iter) {
     if (rank == 0)
       std::println("\n[starfwi-fwi] ===== Iteration {}/{} =====",
                    iter + 1, args.num_iterations);
 
     // -------- Submit tasks for every shot --------
     size_t shots_at_resume = (size_t)shots_completed;
-    for (size_t i = (size_t)shots_completed; i < n_shots; ++i) {
+    for (size_t i = (size_t)shots_completed; i < n_shots && !interrupted; ++i) {
       int owner_rank = i % size;
+
+      // Check for spot interruption notice before submitting the next shot.
+      // The check is collective: SIGUSR1 only reaches ranks on the affected
+      // node, but the emergency flush must involve all ranks.
+      if (cp_template && check_spot_interrupt(MPI_COMM_WORLD)) {
+        shots_completed = static_cast<int>(i);
+        if (rank == 0)
+          std::println("[starfwi-fwi] Spot interruption detected — "
+                       "flushing emergency checkpoint at shot {} of {} and exiting",
+                       shots_completed, n_shots);
+        flush_checkpoint_with_metrics(cp_template, args.checkpoint_dir, rank);
+        interrupted = true;
+        break;
+      }
 
       auto make_arg = [&]() -> starfwi::CodeletArg * {
         auto *arg = new starfwi::CodeletArg();
@@ -374,11 +440,14 @@ int main(int argc, char **argv) {
         if (rank == 0)
           std::println("[starfwi-fwi] Flushing checkpoint after shot {} of {}",
                        shots_completed, n_shots);
-        starpu_mpi_checkpoint_flush_to_storage(cp_template);
+        flush_checkpoint_with_metrics(cp_template, args.checkpoint_dir, rank);
       }
     }
     // All shots submitted for this iteration — reset counter for next
-    shots_completed = 0;
+    if (!interrupted)
+      shots_completed = 0;
+
+    if (interrupted) break;
 
     // -------- Wait for all tasks --------
     if (args.verbose)
