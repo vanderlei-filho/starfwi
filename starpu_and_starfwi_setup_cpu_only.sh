@@ -93,7 +93,11 @@ if [ ! -f "$MARMOUSI2_ZIP" ]; then
 fi
 
 sudo mkdir -p "${SHARED_DIR}/marmousi2"
-sudo unzip -o "$MARMOUSI2_ZIP" 'marmousi2/*.segy' -d "$SHARED_DIR"
+sudo unzip -o "$MARMOUSI2_ZIP" 'marmousi2/*.segy.tar.gz' -d "$SHARED_DIR"
+for f in "${SHARED_DIR}/marmousi2/"*.segy.tar.gz; do
+    sudo tar -xzf "$f" -C "${SHARED_DIR}/marmousi2"
+    sudo rm -f "$f"
+done
 sudo chmod -R a+rX "${SHARED_DIR}/marmousi2"
 
 echo "==> Marmousi2 data ready at '${SHARED_DIR}/marmousi2'."
