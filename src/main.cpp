@@ -1,5 +1,3 @@
-#include "acoustics/finite_difference_solver.hpp"
-#include "acoustics/receiver_recorder.hpp"
 #include "codelets/backward_propagation.hpp"
 #include "codelets/compute_misfit.hpp"
 #include "codelets/forward_propagation.hpp"
@@ -330,40 +328,33 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ========== STEP 5c: GENERATE OBSERVED DATA (PREPROCESSING) ==========
-  // Each rank forward-propagates ALL shots with the true velocity model and
-  // stores the resulting seismograms as observed data in memory. All ranks
-  // process all shots so that the StarPU task submission condition
-  // (!observed_data.empty()) is identical on every rank (required for
-  // StarPU-MPI collective task submission).
+  // ========== STEP 5c: LOAD OBSERVED DATA FROM DISK ==========
+  // All ranks load the observed seismograms produced by starfwi-modeling.
+  // Files must exist in --observed-dir (default: ./observed).
+  // Run starfwi-modeling first if they are missing.
   if (rank == 0) {
-    std::println("[starfwi] Generating observed data from true velocity model "
-                 "({} shots × {} timesteps)...",
-                 n_shots, config.time.nt);
+    std::println("[starfwi] Loading observed data from '{}' ({} shots)...",
+                 args.observed_dir, n_shots);
   }
-  {
-    SimulationConfig true_config = config;
-    for (size_t i = 0; i < n_shots; ++i) {
-      FiniteDifferenceSolver solver(true_config);
-      solver.initialize();
-      solver.set_source_position(shots[i].source_x, shots[i].source_y,
-                                 shots[i].source_z);
-      ReceiverRecorder recorder(receivers.x.data(), receivers.y.data(),
-                                receivers.z.data(), n_receivers,
-                                config.time.nt, config.grid.nx, config.grid.ny,
-                                config.grid.nz, config.grid.dx, config.grid.dy,
-                                config.grid.dz);
-      for (size_t t = 0; t < config.time.nt; ++t) {
-        if (t < shots[i].source_wavelet.size())
-          solver.apply_source(shots[i].source_wavelet[t], shots[i].shot_id);
-        solver.step();
-        recorder.record_timestep(solver, t);
-      }
-      shots[i].observed_data = recorder.get_synthetic_data();
+  for (size_t i = 0; i < n_shots; ++i) {
+    std::string filename = starfwi::utils::SeismogramIO::generate_filename(
+        args.observed_dir, shots[i].shot_id);
+    starfwi::utils::SeismogramIO::Header obs_header;
+    auto load_result = starfwi::utils::SeismogramIO::load(
+        filename, shots[i].observed_data, obs_header);
+    if (!load_result) {
+      std::println(stderr,
+                   "[starfwi][{}] Error loading observed data for shot {}: {}\n"
+                   "  Run starfwi-modeling first to generate observed data in '{}'.",
+                   node_name, shots[i].shot_id, load_result.error(),
+                   args.observed_dir);
+      starpu_mpi_shutdown();
+      return 1;
     }
   }
   if (rank == 0) {
-    std::println("[starfwi] Observed data generation complete.");
+    std::println("[starfwi] Observed data loaded successfully ({} shots).",
+                 n_shots);
   }
 
   // ========== STEP 5d: PERTURB VELOCITY MODEL ==========

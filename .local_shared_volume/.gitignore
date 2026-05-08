@@ -3,6 +3,6 @@
 !marmousi2.zip
 !.gitignore
 !.gitkeep
-!appfile
+!appfile.example
 !prof_files/
 !perf_models/
