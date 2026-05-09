@@ -80,31 +80,3 @@ sudo chmod +x \
     "$INSTALL_PREFIX/bin/starfwi-fwi"
 
 echo "==> StarFWI installed successfully."
-
-# ── 3. Marmousi2 data ─────────────────────────────────────────────────────────
-echo ""
-echo "==> Copying Marmousi2 data to '${SHARED_DIR}/marmousi2'..."
-
-MARMOUSI2_ZIP="$STARFWI_SRC_DIR/.local_shared_volume/marmousi2.zip"
-
-if [ ! -f "$MARMOUSI2_ZIP" ]; then
-    echo "ERROR: marmousi2.zip not found at $MARMOUSI2_ZIP" >&2
-    exit 1
-fi
-
-sudo mkdir -p "${SHARED_DIR}/marmousi2"
-sudo unzip -o "$MARMOUSI2_ZIP" 'marmousi2/*.segy.tar.gz' -d "$SHARED_DIR"
-for f in "${SHARED_DIR}/marmousi2/"*.segy.tar.gz; do
-    sudo tar -xzf "$f" -C "${SHARED_DIR}/marmousi2"
-    sudo rm -f "$f"
-done
-sudo chmod -R a+rX "${SHARED_DIR}/marmousi2"
-
-echo "==> Marmousi2 data ready at '${SHARED_DIR}/marmousi2'."
-
-cd / && rm -rf "$STARFWI_SRC_DIR"
-
-echo ""
-echo "Verify installation:"
-echo "  starpu_machine_display   # should list CPU workers and MPI"
-echo "  starfwi-fwi --help       # should print usage"

@@ -8,8 +8,8 @@ set -euo pipefail
 sudo tee /etc/profile.d/hpc-env.sh << 'EOF'
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
-export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH}"
-export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH}"
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}"
 EOF
 source /etc/profile.d/hpc-env.sh
 

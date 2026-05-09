@@ -433,15 +433,6 @@ int main(int argc, char **argv) {
                      "[starfwi-fwi][{}] ERROR: backward_propagation shot {} ({})",
                      node_name, i, ret);
 
-      // Periodic checkpoint flush
-      if (cp_template && args.checkpoint_interval > 0 &&
-          ((i + 1 - shots_at_resume) % args.checkpoint_interval == 0)) {
-        shots_completed = static_cast<int>(i + 1);
-        if (rank == 0)
-          std::println("[starfwi-fwi] Flushing checkpoint after shot {} of {}",
-                       shots_completed, n_shots);
-        flush_checkpoint_with_metrics(cp_template, args.checkpoint_dir, rank);
-      }
     }
     // All shots submitted for this iteration — reset counter for next
     if (!interrupted)
@@ -454,6 +445,20 @@ int main(int argc, char **argv) {
       std::println("[starfwi-fwi][{}] Waiting for tasks (iter {})...",
                    node_name, iter + 1);
     starpu_task_wait_for_all();
+
+    // -------- Checkpoint flushes (after all shots complete) --------
+    // Flushes are deferred until here so all workers process shots in parallel
+    // regardless of checkpoint_interval. k controls flush count, not batch size.
+    if (cp_template && args.checkpoint_interval > 0) {
+      size_t n_flushes = (n_shots + args.checkpoint_interval - 1) / args.checkpoint_interval;
+      for (size_t f = 0; f < n_flushes; ++f) {
+        size_t shot_at_flush = std::min((f + 1) * args.checkpoint_interval, n_shots);
+        if (rank == 0)
+          std::println("[starfwi-fwi] Flushing checkpoint after shot {} of {}",
+                       shot_at_flush, n_shots);
+        flush_checkpoint_with_metrics(cp_template, args.checkpoint_dir, rank);
+      }
+    }
 
     // -------- Gradient and misfit reduction --------
     std::vector<float> local_gradient(n_velocity, 0.0f);
