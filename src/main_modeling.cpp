@@ -176,9 +176,9 @@ int main(int argc, char **argv) {
                               (uintptr_t)receivers.y.data(), n_receivers, sizeof(float));
   starpu_vector_data_register(&receiver_z_handle, STARPU_MAIN_RAM,
                               (uintptr_t)receivers.z.data(), n_receivers, sizeof(float));
-  starpu_mpi_data_register(receiver_x_handle, 100, 0);
-  starpu_mpi_data_register(receiver_y_handle, 101, 0);
-  starpu_mpi_data_register(receiver_z_handle, 102, 0);
+  starpu_mpi_data_register(receiver_x_handle, 10001, 0);
+  starpu_mpi_data_register(receiver_y_handle, 10002, 0);
+  starpu_mpi_data_register(receiver_z_handle, 10003, 0);
 
   starfwi::TaskConfig task_config;
   task_config.nx = config.grid.nx;

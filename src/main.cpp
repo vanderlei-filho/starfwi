@@ -389,9 +389,9 @@ int main(int argc, char **argv) {
   starpu_vector_data_register(&receiver_z_handle, STARPU_MAIN_RAM,
                               (uintptr_t)receivers.z.data(), n_receivers,
                               sizeof(float));
-  starpu_mpi_data_register(receiver_x_handle, 100, 0); // Tag 100, owner rank 0
-  starpu_mpi_data_register(receiver_y_handle, 101, 0); // Tag 101, owner rank 0
-  starpu_mpi_data_register(receiver_z_handle, 102, 0); // Tag 102, owner rank 0
+  starpu_mpi_data_register(receiver_x_handle, 10001, 0); // Tag 10001, owner rank 0
+  starpu_mpi_data_register(receiver_y_handle, 10002, 0); // Tag 10002, owner rank 0
+  starpu_mpi_data_register(receiver_z_handle, 10003, 0); // Tag 10003, owner rank 0
 
   // Register task configuration (VARIABLE handle)
   // All ranks need to register with the same data structure
