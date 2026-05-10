@@ -475,7 +475,11 @@ int main(int argc, char **argv) {
           ? static_cast<int>(std::min(avail / per_worker,
                                       static_cast<size_t>(n_cpu)))
           : n_cpu;
-      const int bwd_parallel  = std::max(1, max_bwd);
+      // Cap at 2 concurrent backward workers: empirically safe on all tested
+      // instance types (c5/c8i/g7e/r8i). Higher N causes actual RSS to exceed
+      // the formula estimate by 2-3×, leading to OOM on large-RAM instances.
+      // N=2 also ensures identical conditions across node types for fair comparison.
+      const int bwd_parallel  = std::max(1, std::min(max_bwd, 2));
       starfwi::init_backward_semaphore(bwd_parallel);
 
       if (rank == 0)

@@ -13,24 +13,25 @@
 
 namespace starfwi {
 
+// Backward propagation is CPU-only intentionally.
+// REVOLVE checkpointing manages large pressure-field arrays in CPU RAM; routing
+// backward tasks to CPU workers on all node types ensures identical memory
+// behaviour and fair cross-instance comparison. The GPU (on g7e) is reserved
+// exclusively for forward propagation where it provides the largest speedup.
 struct starpu_codelet backward_propagation_codelet = {
     .cpu_funcs      = {backward_propagation_cpu},
-#ifdef STARPU_USE_CUDA
-    .cuda_funcs     = {backward_propagation_cuda},
-    .cuda_flags     = {STARPU_CUDA_ASYNC},
-#endif
     .cpu_funcs_name = {"backward_propagation_cpu"},
     .nbuffers = 6, // velocity, shot, config, receiver_x, receiver_y, receiver_z
     .modes = {STARPU_R, STARPU_RW, STARPU_R, STARPU_R, STARPU_R, STARPU_R},
-    // Same reasoning as forward_propagation_codelet: keep shot (buf 1) and
-    // task_config (buf 2) in host RAM. See forward_propagation.cpp for details.
+    // Keep shot (buf 1) and task_config (buf 2) in host RAM — they contain
+    // std::vector members with heap data that StarPU cannot serialize to GPU.
     .specific_nodes = 1,
-    .nodes = {STARPU_SPECIFIC_NODE_LOCAL,  // buf 0: velocity → GPU for CUDA
-              STARPU_SPECIFIC_NODE_CPU,    // buf 1: shot     → always host RAM
-              STARPU_SPECIFIC_NODE_CPU,    // buf 2: config   → always host RAM
-              STARPU_SPECIFIC_NODE_LOCAL,  // buf 3: recv_x   → GPU for CUDA
-              STARPU_SPECIFIC_NODE_LOCAL,  // buf 4: recv_y   → GPU for CUDA
-              STARPU_SPECIFIC_NODE_LOCAL}, // buf 5: recv_z   → GPU for CUDA
+    .nodes = {STARPU_SPECIFIC_NODE_CPU,   // buf 0: velocity  → CPU (no GPU transfer)
+              STARPU_SPECIFIC_NODE_CPU,   // buf 1: shot      → always host RAM
+              STARPU_SPECIFIC_NODE_CPU,   // buf 2: config    → always host RAM
+              STARPU_SPECIFIC_NODE_CPU,   // buf 3: recv_x    → CPU
+              STARPU_SPECIFIC_NODE_CPU,   // buf 4: recv_y    → CPU
+              STARPU_SPECIFIC_NODE_CPU},  // buf 5: recv_z    → CPU
     .name = "backward_propagation",
     .color = 0x00FF00};
 
