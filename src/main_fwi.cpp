@@ -23,6 +23,7 @@
 #include <mpi.h>
 #include <print>
 #include <starpu.h>
+#include <starpu_disk.h>
 #include <starpu_mpi.h>
 #include <starpu_mpi_ft.h>
 
@@ -122,7 +123,28 @@ int main(int argc, char **argv) {
   }
   starfwi::utils::CliArgs args = *parse_result;
 
-  // ========== STEP 2b: CHECKPOINT RESTART DETECTION ==========
+  // ========== STEP 2b: STARPU DISK EVICTION BACKEND ==========
+  // Lets StarPU spill data handles (gradients, seismograms) to disk when RAM
+  // is exhausted, preventing OOM failures during parallel shot processing.
+  {
+    std::string eviction_path = args.wavefield_dir.empty()
+        ? "/tmp/starpu_scratch"
+        : args.wavefield_dir + "/.starpu_scratch";
+    std::filesystem::create_directories(eviction_path);
+    int disk_ret = starpu_disk_register(&starpu_disk_unistd_ops,
+                                        (void *)eviction_path.c_str(),
+                                        512ULL << 30);
+    if (rank == 0) {
+      if (disk_ret < 0)
+        std::println("[starfwi-fwi] WARNING: StarPU disk eviction registration "
+                     "failed (path='{}')", eviction_path);
+      else
+        std::println("[starfwi-fwi] StarPU disk eviction registered at '{}'",
+                     eviction_path);
+    }
+  }
+
+  // ========== STEP 2c: CHECKPOINT RESTART DETECTION ==========
   int restart_flag = 0;
   if (!args.checkpoint_dir.empty()) {
     starpu_mpi_init_from_checkpoint(args.checkpoint_dir.c_str(), &restart_flag);
