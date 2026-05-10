@@ -179,16 +179,13 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     const size_t bytes_per_snap = grid_size * sizeof(float);
 
-    if (snap_bytes <= free_ram * 7 / 10) {
-      actual_storage = 0; // MEMORY — all snapshots fit
-      if (verbose)
-        std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
-                     "in host RAM ({} MB needed, {} MB available)",
-                     hostname, shot->shot_id, snap_bytes >> 20,
-                     (free_ram * 7 / 10) >> 20);
-    } else if (task_config->n_revolve_checkpoints >= 2) {
-      // REVOLVE — use pre-computed n_cp from main_fwi.cpp (based on MemTotal,
-      // consistent across all shots regardless of runtime allocation state).
+    if (task_config->n_revolve_checkpoints >= 2) {
+      // REVOLVE always takes priority over MEMORY when configured.
+      // On large-RAM machines (r8i 128 GB, g7e 64 GB) MemAvailable easily
+      // exceeds the snap_bytes threshold, so the MEMORY check below would
+      // trigger and each worker would allocate nt×grid_size bytes (28 GB for
+      // nt=200), causing OOM when multiple workers run simultaneously.
+      // REVOLVE is always the right choice: bounded memory, no disk I/O.
       const size_t n_cp = task_config->n_revolve_checkpoints;
       const size_t K    = task_config->revolve_segment_size;
       actual_storage = 3;
@@ -200,6 +197,13 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
                    "REVOLVE ({} checkpoints, segment size {}, {} MB RAM)",
                    hostname, shot->shot_id, n_cp, K,
                    (n_cp * bytes_per_snap) >> 20);
+    } else if (snap_bytes <= free_ram * 7 / 10) {
+      actual_storage = 0; // MEMORY — fits in RAM and REVOLVE not configured
+      if (verbose)
+        std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
+                     "in host RAM ({} MB needed, {} MB available)",
+                     hostname, shot->shot_id, snap_bytes >> 20,
+                     (free_ram * 7 / 10) >> 20);
     } else {
       // REVOLVE not configured — fall back to disk
       actual_storage = 1;
