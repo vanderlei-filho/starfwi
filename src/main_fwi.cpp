@@ -328,6 +328,8 @@ int main(int argc, char **argv) {
       (args.wavefield_storage == starfwi::utils::CliArgs::WavefieldStorage::MEMORY) ? 0 : 1;
   std::strncpy(task_config.wavefield_dir, args.wavefield_dir.c_str(), 255);
   task_config.wavefield_dir[255] = '\0';
+  task_config.shots_per_rank = (n_shots + static_cast<size_t>(size) - 1)
+                                / static_cast<size_t>(size);
 
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,

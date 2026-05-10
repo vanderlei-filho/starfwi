@@ -109,11 +109,13 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   //   read one new snapshot from disk per adjoint step.
   // ================================================================
   // Use the storage mode actually chosen by the forward codelet at runtime.
-  // This may differ from task_config->wavefield_storage when auto-detection
-  // overrode the requested mode based on available GPU/host memory.
   const bool use_memory = (shot->wavefield_storage_actual == 0);
+  const bool use_disk   = (shot->wavefield_storage_actual == 1);
+  const bool use_hybrid = (shot->wavefield_storage_actual == 2);
+  const size_t n_in_ram = shot->snapshots_in_ram; // HYBRID: first n_in_ram in RAM
+  const bool needs_file = use_disk || use_hybrid;
 
-  // DISK: open wavefield file and set up rolling buffer
+  // Rolling buffer for disk/hybrid modes (p_hi, p_mid, p_lo = three adjacent snapshots).
   std::ifstream wf_in;
   std::string wf_file;
   std::vector<float> p_hi (grid_size, 0.0f); // p[t_fwd+1], init = p[nt] ≈ 0
@@ -129,8 +131,9 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
                    shot->pressure_snapshots.size(), nt * grid_size);
       return;
     }
-  } else {
-    // DISK: open the file written by the forward codelet
+  }
+
+  if (needs_file) {
     wf_file = std::format("{}/fwd_shot_{}.bin",
                            task_config->wavefield_dir, shot->shot_id);
     wf_in.open(wf_file, std::ios::binary);
@@ -141,13 +144,30 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
                    hostname, shot->shot_id, wf_file);
       return;
     }
+  }
 
+  // Unified snapshot accessor for disk and hybrid modes.
+  // DISK:   file contains t=0..nt-1, offset = t * grid_size * sizeof(float)
+  // HYBRID: file contains t=n_in_ram..nt-1, offset = (t-n_in_ram) * grid_size * sizeof(float)
+  //         RAM contains t=0..n_in_ram-1 in shot->pressure_snapshots
+  long long disk_read_ms = 0; // declared here so read_snap can capture it
+  auto read_snap = [&](size_t t, std::vector<float> &buf) {
+    if (use_hybrid && t < n_in_ram) {
+      const float *src = shot->pressure_snapshots.data() + t * grid_size;
+      std::copy(src, src + grid_size, buf.data());
+    } else {
+      const size_t file_t = use_hybrid ? (t - n_in_ram) : t;
+      auto t0 = std::chrono::high_resolution_clock::now();
+      wf_in.seekg(static_cast<std::streamoff>(file_t * grid_size * sizeof(float)));
+      wf_in.read(reinterpret_cast<char *>(buf.data()), grid_size * sizeof(float));
+      disk_read_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::high_resolution_clock::now() - t0).count();
+    }
+  };
+
+  if (needs_file) {
     // Prime the rolling buffer with the last two snapshots.
     // p_hi starts as zero (p[nt] ≈ 0, wave has left the domain).
-    auto read_snap = [&](size_t t, std::vector<float> &buf) {
-      wf_in.seekg(static_cast<std::streamoff>(t * grid_size * sizeof(float)));
-      wf_in.read(reinterpret_cast<char *>(buf.data()), grid_size * sizeof(float));
-    };
     read_snap(nt - 1, p_mid);
     if (nt >= 2) read_snap(nt - 2, p_lo);
   }
@@ -163,7 +183,6 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   //   p̈ = (p[t_fwd+1] − 2·p[t_fwd] + p[t_fwd−1]) / dt²
   // ================================================================
   std::vector<float> gradient(grid_size, 0.0f);
-  long long disk_read_ms = 0;
 
   SimulationConfig config;
   config.grid.nx = nx; config.grid.ny = ny; config.grid.nz = nz;
@@ -207,7 +226,7 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
           gradient[i] += (-2.0f * dt / c_cubed[i]) * p_ddot * q[i];
         }
       } else {
-        // DISK: p_hi/p_mid/p_lo already loaded into rolling buffer.
+        // DISK or HYBRID: p_hi/p_mid/p_lo already loaded into rolling buffer.
         for (size_t i = 0; i < grid_size; ++i) {
           float p_ddot = (p_hi[i] - 2.0f * p_mid[i] + p_lo[i]) * dt2_inv;
           gradient[i] += (-2.0f * dt / c_cubed[i]) * p_ddot * q[i];
@@ -215,29 +234,23 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
       }
     }
 
-    // Advance DISK rolling buffer: shift window and read next snapshot.
-    if (!use_memory && t_fwd >= 1) {
+    // Advance rolling buffer for disk/hybrid modes.
+    if (needs_file && t_fwd >= 1) {
       std::swap(p_hi, p_mid);
       std::swap(p_mid, p_lo);
-      auto t0 = std::chrono::high_resolution_clock::now();
-      if (t_fwd >= 2) {
-        wf_in.seekg(static_cast<std::streamoff>((t_fwd - 2) * grid_size * sizeof(float)));
-        wf_in.read(reinterpret_cast<char *>(p_lo.data()), grid_size * sizeof(float));
-      } else {
+      if (t_fwd >= 2)
+        read_snap(t_fwd - 2, p_lo);
+      else
         std::fill(p_lo.begin(), p_lo.end(), 0.0f); // p[-1] ≈ 0
-      }
-      disk_read_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::high_resolution_clock::now() - t0).count();
     }
   }
 
   shot->gradient = std::move(gradient);
 
-  // Free snapshot memory now that it's no longer needed.
-  if (use_memory) {
-    shot->pressure_snapshots.clear();
-    shot->pressure_snapshots.shrink_to_fit();
-  } else {
+  // Free snapshot memory and disk file now that they're no longer needed.
+  shot->pressure_snapshots.clear();
+  shot->pressure_snapshots.shrink_to_fit();
+  if (needs_file) {
     wf_in.close();
     std::filesystem::remove(wf_file);
   }
@@ -251,10 +264,13 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
                  "propagation completed in {:.3f} s",
                  hostname, shot->shot_id, total_ms / 1000.0);
 
+  const std::string storage_str = use_memory  ? "ram"
+                                 : use_hybrid ? "hybrid"
+                                              : "disk";
   std::println("[METRIC] shot={} bwd_total_ms={} bwd_compute_ms={} "
                "bwd_disk_read_ms={} storage={}",
                shot->shot_id, total_ms, total_ms - disk_read_ms,
-               disk_read_ms, use_memory ? "ram" : "disk");
+               disk_read_ms, storage_str);
 }
 
 } // namespace starfwi

@@ -176,32 +176,50 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
       }
     }
 
-    if (snap_bytes < free_ram * 7 / 10) {
-      actual_storage = 0; // MEMORY
+    const size_t bytes_per_snap = grid_size * sizeof(float);
+    // Divide budget by shots_per_rank: all shots' pressure_snapshots are alive
+    // simultaneously during the backward pass, so the total must fit in 70% of RAM.
+    const size_t n_shots = std::max(size_t(1), task_config->shots_per_rank);
+    const size_t ram_budget = free_ram * 7 / 10 / n_shots;
+
+    if (snap_bytes <= ram_budget) {
+      actual_storage = 0; // MEMORY — all snapshots fit
       if (verbose)
         std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
-                     "in host RAM ({} MB needed, {} MB free)",
-                     hostname, shot->shot_id,
-                     snap_bytes >> 20, (free_ram * 7 / 10) >> 20);
-    } else {
-      actual_storage = 1; // DISK
+                     "in host RAM ({} MB needed, {} MB available)",
+                     hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20);
+    } else if (bytes_per_snap > ram_budget) {
+      actual_storage = 1; // DISK — not even one snapshot fits
       std::println(stderr,
                    "[starfwi][{}][forward_propagation_cpu] Shot {}: insufficient "
-                   "host RAM for snapshots ({} MB needed, {} MB free) — using disk",
-                   hostname, shot->shot_id,
-                   snap_bytes >> 20, (free_ram * 7 / 10) >> 20);
+                   "host RAM for snapshots ({} MB needed, {} MB available) — using disk",
+                   hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20);
+    } else {
+      actual_storage = 2; // HYBRID — keep as many snapshots in RAM as fit
+      shot->snapshots_in_ram = ram_budget / bytes_per_snap;
+      std::println(stderr,
+                   "[starfwi][{}][forward_propagation_cpu] Shot {}: insufficient "
+                   "host RAM for all snapshots ({} MB needed, {} MB available) — "
+                   "using hybrid ({} of {} snapshots in RAM, rest on disk)",
+                   hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20,
+                   shot->snapshots_in_ram, task_config->nt);
     }
   }
   shot->wavefield_storage_actual = actual_storage;
 
   const bool use_memory = (actual_storage == 0);
   const bool use_disk   = (actual_storage == 1);
+  const bool use_hybrid = (actual_storage == 2);
+  const size_t n_in_ram = shot->snapshots_in_ram;
 
   // Pre-allocate snapshot storage
   std::ofstream wf_out;
   if (use_memory) {
     shot->pressure_snapshots.resize(task_config->nt * grid_size);
-  } else if (use_disk) {
+  } else if (use_hybrid) {
+    shot->pressure_snapshots.resize(n_in_ram * grid_size);
+  }
+  if (use_disk || use_hybrid) {
     std::string wf_file = std::format("{}/fwd_shot_{}.bin",
                                        task_config->wavefield_dir, shot->shot_id);
     std::filesystem::create_directories(task_config->wavefield_dir);
@@ -238,10 +256,10 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     // Save forward pressure snapshot for adjoint (backward) propagation
     const std::vector<float> &p = propagator.get_pressure_field();
-    if (use_memory) {
+    if (use_memory || (use_hybrid && t < n_in_ram)) {
       std::copy(p.begin(), p.end(),
                 shot->pressure_snapshots.begin() + t * grid_size);
-    } else if (use_disk && wf_out) {
+    } else if (wf_out) {
       auto t0 = std::chrono::high_resolution_clock::now();
       wf_out.write(reinterpret_cast<const char *>(p.data()),
                    grid_size * sizeof(float));
@@ -285,7 +303,7 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     delete recorder;
   }
 
-  if (use_disk && wf_out)
+  if (wf_out)
     wf_out.close();
 
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -298,10 +316,14 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
                  hostname, shot->shot_id, total_ms / 1000.0);
   }
 
+  const std::string storage_str = use_memory  ? "ram"
+                                 : use_hybrid ? std::format("hybrid({}ram+{}disk)",
+                                                    n_in_ram, task_config->nt - n_in_ram)
+                                              : "disk";
   std::println("[METRIC] shot={} fwd_total_ms={} fwd_compute_ms={} "
                "fwd_disk_write_ms={} storage={}",
                shot->shot_id, total_ms, total_ms - disk_write_ms,
-               disk_write_ms, use_disk ? "disk" : "ram");
+               disk_write_ms, storage_str);
 }
 
 } // namespace starfwi

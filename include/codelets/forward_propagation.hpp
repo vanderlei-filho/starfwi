@@ -28,6 +28,10 @@ struct TaskConfig {
   //   1 = DISK   — write snapshots to a temp file in wavefield_dir
   int wavefield_storage;
   char wavefield_dir[256];
+
+  // Number of shots assigned to this MPI rank. Used to compute the per-shot
+  // RAM budget for hybrid storage so all shots fit in memory simultaneously.
+  size_t shots_per_rank;
 };
 
 // Codelet argument to pass MPI rank and host information
@@ -68,10 +72,13 @@ struct ShotData {
   // Actual snapshot storage mode chosen at runtime by the forward codelet.
   // May differ from task_config->wavefield_storage when auto-detection overrides
   // the requested mode based on available GPU/host memory.
-  //   0 = MEMORY (data in pressure_snapshots)
-  //   1 = DISK   (data in a binary file)
-  //  -1 = NONE / not yet set (modeling path, no backward needed)
+  //  -1 = NONE    (modeling path, no backward needed)
+  //   0 = MEMORY  (all nt snapshots in pressure_snapshots)
+  //   1 = DISK    (all nt snapshots in a binary file)
+  //   2 = HYBRID  (first snapshots_in_ram snapshots in pressure_snapshots,
+  //                remaining nt - snapshots_in_ram snapshots in a binary file)
   int wavefield_storage_actual = -1;
+  size_t snapshots_in_ram = 0; // HYBRID only: number of snapshots kept in RAM
 };
 
 // StarPU codelet for forward wave propagation
