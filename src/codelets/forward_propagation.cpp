@@ -2,6 +2,7 @@
 #include "acoustics/finite_difference_solver.hpp"
 #include "acoustics/receiver_recorder.hpp"
 #include "utils/snapshot_writer.hpp"
+#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -177,49 +178,53 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     }
 
     const size_t bytes_per_snap = grid_size * sizeof(float);
-    // Divide budget by shots_per_rank: all shots' pressure_snapshots are alive
-    // simultaneously during the backward pass, so the total must fit in 70% of RAM.
-    const size_t n_shots = std::max(size_t(1), task_config->shots_per_rank);
-    const size_t ram_budget = free_ram * 7 / 10 / n_shots;
 
-    if (snap_bytes <= ram_budget) {
+    if (snap_bytes <= free_ram * 7 / 10) {
       actual_storage = 0; // MEMORY — all snapshots fit
       if (verbose)
         std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
                      "in host RAM ({} MB needed, {} MB available)",
-                     hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20);
-    } else if (bytes_per_snap > ram_budget) {
-      actual_storage = 1; // DISK — not even one snapshot fits
+                     hostname, shot->shot_id, snap_bytes >> 20,
+                     (free_ram * 7 / 10) >> 20);
+    } else if (task_config->n_revolve_checkpoints >= 2) {
+      // REVOLVE — use pre-computed n_cp from main_fwi.cpp (based on MemTotal,
+      // consistent across all shots regardless of runtime allocation state).
+      const size_t n_cp = task_config->n_revolve_checkpoints;
+      const size_t K    = task_config->revolve_segment_size;
+      actual_storage = 3;
+      shot->revolve_segment_size = K;
+      shot->revolve_checkpoints.assign(n_cp, std::vector<float>(grid_size));
+      shot->revolve_checkpoint_times.resize(n_cp);
       std::println(stderr,
-                   "[starfwi][{}][forward_propagation_cpu] Shot {}: insufficient "
-                   "host RAM for snapshots ({} MB needed, {} MB available) — using disk",
-                   hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20);
+                   "[starfwi][{}][forward_propagation_cpu] Shot {}: using "
+                   "REVOLVE ({} checkpoints, segment size {}, {} MB RAM)",
+                   hostname, shot->shot_id, n_cp, K,
+                   (n_cp * bytes_per_snap) >> 20);
     } else {
-      actual_storage = 2; // HYBRID — keep as many snapshots in RAM as fit
-      shot->snapshots_in_ram = ram_budget / bytes_per_snap;
+      // REVOLVE not configured — fall back to disk
+      actual_storage = 1;
       std::println(stderr,
-                   "[starfwi][{}][forward_propagation_cpu] Shot {}: insufficient "
-                   "host RAM for all snapshots ({} MB needed, {} MB available) — "
-                   "using hybrid ({} of {} snapshots in RAM, rest on disk)",
-                   hostname, shot->shot_id, snap_bytes >> 20, ram_budget >> 20,
-                   shot->snapshots_in_ram, task_config->nt);
+                   "[starfwi][{}][forward_propagation_cpu] Shot {}: REVOLVE "
+                   "not configured — using disk",
+                   hostname, shot->shot_id);
     }
   }
   shot->wavefield_storage_actual = actual_storage;
 
-  const bool use_memory = (actual_storage == 0);
-  const bool use_disk   = (actual_storage == 1);
-  const bool use_hybrid = (actual_storage == 2);
-  const size_t n_in_ram = shot->snapshots_in_ram;
+  const bool use_memory  = (actual_storage == 0);
+  const bool use_disk    = (actual_storage == 1);
+  const bool use_revolve = (actual_storage == 3);
+  const bool use_hybrid  = false; // HYBRID retired in favour of REVOLVE
+
+  const size_t K        = shot->revolve_segment_size;
+  const size_t n_in_ram = 0; // unused (HYBRID retired)
 
   // Pre-allocate snapshot storage
   std::ofstream wf_out;
   if (use_memory) {
     shot->pressure_snapshots.resize(task_config->nt * grid_size);
-  } else if (use_hybrid) {
-    shot->pressure_snapshots.resize(n_in_ram * grid_size);
   }
-  if (use_disk || use_hybrid) {
+  if (use_disk) {
     std::string wf_file = std::format("{}/fwd_shot_{}.bin",
                                        task_config->wavefield_dir, shot->shot_id);
     std::filesystem::create_directories(task_config->wavefield_dir);
@@ -256,9 +261,14 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     // Save forward pressure snapshot for adjoint (backward) propagation
     const std::vector<float> &p = propagator.get_pressure_field();
-    if (use_memory || (use_hybrid && t < n_in_ram)) {
+    if (use_memory) {
       std::copy(p.begin(), p.end(),
                 shot->pressure_snapshots.begin() + t * grid_size);
+    } else if (use_revolve && t % K == 0) {
+      // Save checkpoint at the start of each segment
+      const size_t cp_idx = t / K;
+      std::copy(p.begin(), p.end(), shot->revolve_checkpoints[cp_idx].begin());
+      shot->revolve_checkpoint_times[cp_idx] = t;
     } else if (wf_out) {
       auto t0 = std::chrono::high_resolution_clock::now();
       wf_out.write(reinterpret_cast<const char *>(p.data()),
@@ -317,8 +327,8 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   }
 
   const std::string storage_str = use_memory  ? "ram"
-                                 : use_hybrid ? std::format("hybrid({}ram+{}disk)",
-                                                    n_in_ram, task_config->nt - n_in_ram)
+                                 : use_revolve ? std::format("revolve({}cp,K={})",
+                                                    shot->revolve_checkpoints.size(), K)
                                               : "disk";
   std::println("[METRIC] shot={} fwd_total_ms={} fwd_compute_ms={} "
                "fwd_disk_write_ms={} storage={}",

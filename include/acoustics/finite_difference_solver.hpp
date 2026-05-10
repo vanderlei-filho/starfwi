@@ -31,6 +31,17 @@ public:
   // Getters
   const std::vector<float> &get_pressure_field() const { return pressure_; }
 
+  // Restore solver state from a checkpoint (used by REVOLVE backward pass).
+  // Sets both pressure_ and pressure_old_ to the saved field so the next
+  // step() is well-defined. Using pressure_old_ = saved is the stationary
+  // approximation — a small error bounded to the first step of each segment.
+  void set_pressure_field(const float *saved, size_t n) {
+    if (n != pressure_.size()) return;
+    std::copy(saved, saved + n, pressure_.begin());
+    std::copy(saved, saved + n, pressure_old_.begin());
+    std::fill(pressure_new_.begin(), pressure_new_.end(), 0.0f);
+  }
+
 private:
   const SimulationConfig &config_;
 

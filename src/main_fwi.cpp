@@ -23,11 +23,73 @@
 #include <mpi.h>
 #include <print>
 #include <starpu.h>
+#include <sys/statvfs.h>
 #include <starpu_disk.h>
 #include <starpu_mpi.h>
 #include <starpu_mpi_ft.h>
 
 static int g_cp_comm_size = 1;
+
+// Returns total size in bytes of all files in a directory matching a pattern.
+static size_t dir_usage_bytes(const std::string &dir, const std::string &suffix) {
+  size_t total = 0;
+  if (dir.empty() || !std::filesystem::exists(dir)) return 0;
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(
+           dir, std::filesystem::directory_options::skip_permission_denied)) {
+    if (entry.is_regular_file() &&
+        entry.path().string().ends_with(suffix))
+      total += entry.file_size();
+  }
+  return total;
+}
+
+// Print a [METRIC] line with process RSS, system MemAvailable, and starfwi
+// disk usage (wavefield + checkpoint dirs) on this MPI rank.
+static void print_resource_metrics(int iter, const std::string &node_name,
+                                   const std::string &wavefield_dir,
+                                   const std::string &checkpoint_dir) {
+  // Process RAM (RSS = pages actually in physical memory)
+  size_t rss_kb = 0;
+  if (std::ifstream f("/proc/self/status"); f) {
+    std::string line;
+    while (std::getline(f, line))
+      if (line.starts_with("VmRSS:")) {
+        std::sscanf(line.c_str(), "VmRSS: %zu kB", &rss_kb);
+        break;
+      }
+  }
+
+  // System available RAM
+  size_t mem_avail_kb = 0;
+  if (std::ifstream f("/proc/meminfo"); f) {
+    std::string line;
+    while (std::getline(f, line))
+      if (line.starts_with("MemAvailable:")) {
+        std::sscanf(line.c_str(), "MemAvailable: %zu kB", &mem_avail_kb);
+        break;
+      }
+  }
+
+  // Disk used by starfwi (wavefield files + checkpoint files)
+  const size_t wf_bytes  = dir_usage_bytes(wavefield_dir,  ".bin");
+  const size_t cp_bytes  = dir_usage_bytes(checkpoint_dir, ".bin");
+
+  // Available disk space on wavefield dir (falls back to checkpoint dir or cwd)
+  size_t disk_avail_bytes = 0;
+  const std::string disk_path = !wavefield_dir.empty() ? wavefield_dir
+                              : !checkpoint_dir.empty() ? checkpoint_dir : ".";
+  struct statvfs vfs{};
+  if (statvfs(disk_path.c_str(), &vfs) == 0)
+    disk_avail_bytes = static_cast<size_t>(vfs.f_bavail) * vfs.f_frsize;
+
+  std::println("[METRIC] iter={} node={} "
+               "ram_used_mb={} ram_available_mb={} "
+               "wavefield_disk_mb={} checkpoint_disk_mb={} disk_available_mb={}",
+               iter, node_name,
+               rss_kb >> 10, mem_avail_kb >> 10,
+               wf_bytes >> 20, cp_bytes >> 20,
+               disk_avail_bytes >> 20);
+}
 static int fwi_shots_backup_rank(int rank) {
   return (rank + 1) % g_cp_comm_size;
 }
@@ -331,6 +393,112 @@ int main(int argc, char **argv) {
   task_config.shots_per_rank = (n_shots + static_cast<size_t>(size) - 1)
                                 / static_cast<size_t>(size);
 
+  // Pre-compute REVOLVE parameters once from effective memory (constant) so every
+  // shot uses the same n_cp regardless of runtime allocation state.
+  {
+    // ---- Read MemTotal from /proc/meminfo ----
+    size_t mem_total = 0;
+    if (std::ifstream meminfo("/proc/meminfo"); meminfo) {
+      std::string line;
+      while (std::getline(meminfo, line)) {
+        if (line.starts_with("MemTotal:")) {
+          size_t kb = 0;
+          std::sscanf(line.c_str(), "MemTotal: %zu kB", &kb);
+          mem_total = kb * 1024ULL;
+          break;
+        }
+      }
+    }
+
+    // ---- Clamp to cgroup memory limit if running in a container ----
+    // In Docker/Podman with mem_limit set, /proc/meminfo shows the host total,
+    // but cgroup files reflect the actual container limit. Use the smaller value.
+    size_t mem_effective = mem_total;
+    {
+      // cgroup v2
+      if (std::ifstream cg("/sys/fs/cgroup/memory.max"); cg) {
+        std::string s;
+        if (std::getline(cg, s) && s != "max") {
+          try {
+            size_t v = std::stoull(s);
+            if (v > 0 && v < mem_effective) mem_effective = v;
+          } catch (...) {}
+        }
+      }
+      // cgroup v1 (limit_in_bytes == ~0ULL means unlimited)
+      if (std::ifstream cg("/sys/fs/cgroup/memory/memory.limit_in_bytes"); cg) {
+        size_t v = 0;
+        if (cg >> v && v > 0 && v < (size_t(-1) >> 1) && v < mem_effective)
+          mem_effective = v;
+      }
+    }
+
+    const size_t grid_size      = config.grid.nx * config.grid.ny * config.grid.nz;
+    const size_t bytes_per_snap = grid_size * sizeof(float);
+    const size_t K_sqrt = std::max(size_t(1),
+                            (size_t)std::ceil(std::sqrt((double)config.time.nt)));
+    const size_t n_cp_sqrt = config.time.nt / K_sqrt + 1;
+
+    // Find the largest n_cp (best REVOLVE compute efficiency) that fits in
+    // 90% of effective memory.  We use 90% (vs a more conservative value) because
+    // production AWS instances run starfwi exclusively and can safely dedicate
+    // nearly all RAM.  Docker containers with mem_limit set will naturally get a
+    // lower effective_mem via cgroup detection, keeping them in DISK mode.
+    //
+    // Total memory modelled:
+    //   S × n_cp              — checkpoint storage (all shots on this rank)
+    //   + W × (K + 14)        — W concurrent REVOLVE backward workers:
+    //                             seg_buf (K+1) + 2 solvers (8) + misc (5)
+    // We first find n_cp assuming W=1 (safe minimum), then solve for the
+    // actual W that fits given that n_cp.
+    const size_t budget_snaps = (mem_effective * 9 / 10) / bytes_per_snap;
+    const size_t S = std::max(size_t(1), task_config.shots_per_rank);
+    size_t n_cp = n_cp_sqrt;
+    while (n_cp >= 2) {
+      const size_t K_try = config.time.nt / (n_cp - 1);
+      if (S * n_cp + K_try + 14 <= budget_snaps) break;
+      --n_cp;
+    }
+
+    if (n_cp >= 2 && mem_effective > 0) {
+      task_config.n_revolve_checkpoints = n_cp;
+      task_config.revolve_segment_size  = config.time.nt / (n_cp - 1);
+      const size_t K_final    = task_config.revolve_segment_size;
+
+      // Compute N: how many REVOLVE backward workers fit in the remaining budget
+      // after reserving S×n_cp slots for checkpoints.
+      const size_t per_worker = K_final + 14; // snaps per backward worker
+      const size_t avail      = (budget_snaps > S * n_cp)
+                                   ? budget_snaps - S * n_cp : 0;
+      const int n_cpu         = starpu_cpu_worker_get_count();
+      const int max_bwd       = (per_worker > 0)
+          ? static_cast<int>(std::min(avail / per_worker,
+                                      static_cast<size_t>(n_cpu)))
+          : n_cpu;
+      const int bwd_parallel  = std::max(1, max_bwd);
+      starfwi::init_backward_semaphore(bwd_parallel);
+
+      if (rank == 0)
+        std::println("[starfwi-fwi] REVOLVE: {} checkpoints, K={} "
+                     "({} MB/shot × {} shots/rank, N={} parallel backward, "
+                     "est. peak {} MB/rank, effective_mem {} MB)",
+                     n_cp, K_final,
+                     (n_cp * bytes_per_snap) >> 20, S,
+                     bwd_parallel,
+                     ((S * n_cp + static_cast<size_t>(bwd_parallel) * per_worker)
+                      * bytes_per_snap) >> 20,
+                     mem_effective >> 20);
+    } else {
+      // REVOLVE doesn't fit — DISK mode.  Init semaphore to n_cpu so the
+      // REVOLVE path (unreachable in this run) remains safe if somehow reached.
+      starfwi::init_backward_semaphore(starpu_cpu_worker_get_count());
+      if (rank == 0)
+        std::println("[starfwi-fwi] REVOLVE: insufficient memory "
+                     "(effective {} MB, budget {} snaps) — falling back to DISK",
+                     mem_effective >> 20, budget_snaps);
+    }
+  }
+
   starpu_data_handle_t config_handle;
   starpu_variable_data_register(&config_handle, STARPU_MAIN_RAM,
                                 (uintptr_t)&task_config, sizeof(starfwi::TaskConfig));
@@ -469,6 +637,10 @@ int main(int argc, char **argv) {
       std::println("[starfwi-fwi][{}] Waiting for tasks (iter {})...",
                    node_name, iter + 1);
     starpu_task_wait_for_all();
+
+    // -------- Resource metrics (per rank, post-iteration) --------
+    print_resource_metrics(iter + 1, node_name, args.wavefield_dir,
+                           args.checkpoint_dir);
 
     // -------- Checkpoint flushes (after all shots complete) --------
     // Flushes are deferred until here so all workers process shots in parallel

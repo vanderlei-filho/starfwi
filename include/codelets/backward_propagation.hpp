@@ -24,6 +24,11 @@ namespace starfwi {
 //   5: receiver Z      (VECTOR, STARPU_R)
 extern struct starpu_codelet backward_propagation_codelet;
 
+// Call once from main_fwi.cpp before submitting backward tasks.
+// n = max concurrent REVOLVE backward workers that fit in the RAM budget.
+// DISK/MEMORY backward tasks are unaffected (they never acquire the semaphore).
+void init_backward_semaphore(int n);
+
 void backward_propagation_cpu(void *buffers[], void *cl_arg);
 
 #ifdef STARPU_USE_CUDA

@@ -29,9 +29,14 @@ struct TaskConfig {
   int wavefield_storage;
   char wavefield_dir[256];
 
-  // Number of shots assigned to this MPI rank. Used to compute the per-shot
-  // RAM budget for hybrid storage so all shots fit in memory simultaneously.
+  // Number of shots assigned to this MPI rank.
   size_t shots_per_rank;
+
+  // Pre-computed REVOLVE parameters (set once in main_fwi.cpp from MemTotal
+  // so every shot uses the same n_cp regardless of runtime free memory).
+  // n_revolve_checkpoints = 0 means REVOLVE is disabled (fall back to disk).
+  size_t n_revolve_checkpoints = 0;
+  size_t revolve_segment_size  = 0;
 };
 
 // Codelet argument to pass MPI rank and host information
@@ -75,10 +80,18 @@ struct ShotData {
   //  -1 = NONE    (modeling path, no backward needed)
   //   0 = MEMORY  (all nt snapshots in pressure_snapshots)
   //   1 = DISK    (all nt snapshots in a binary file)
-  //   2 = HYBRID  (first snapshots_in_ram snapshots in pressure_snapshots,
-  //                remaining nt - snapshots_in_ram snapshots in a binary file)
+  //   2 = HYBRID  (first snapshots_in_ram in pressure_snapshots, rest on disk)
+  //   3 = REVOLVE (sqrt(nt) checkpoints in RAM, backward recomputes each
+  //                segment from its checkpoint — zero disk I/O)
   int wavefield_storage_actual = -1;
-  size_t snapshots_in_ram = 0; // HYBRID only: number of snapshots kept in RAM
+  size_t snapshots_in_ram = 0; // HYBRID only
+
+  // REVOLVE: equally-spaced pressure-field checkpoints saved during forward.
+  // revolve_checkpoints[k] = full pressure field at revolve_checkpoint_times[k].
+  // revolve_segment_size   = timesteps between consecutive checkpoints (≈ sqrt(nt)).
+  std::vector<std::vector<float>> revolve_checkpoints;
+  std::vector<size_t>             revolve_checkpoint_times;
+  size_t                          revolve_segment_size = 0;
 };
 
 // StarPU codelet for forward wave propagation
