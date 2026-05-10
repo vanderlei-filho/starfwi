@@ -7,7 +7,6 @@
 #include <format>
 #include <fstream>
 #include <print>
-#include <sys/sysinfo.h>
 
 namespace starfwi {
 
@@ -161,9 +160,21 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   int actual_storage = -1; // -1 = NONE
   if (task_config->wavefield_storage != 2) {
     const size_t snap_bytes = task_config->nt * grid_size * sizeof(float);
-    struct sysinfo si{};
-    sysinfo(&si);
-    const size_t free_ram = static_cast<size_t>(si.freeram) * si.mem_unit;
+    // Use MemAvailable (not MemFree) so reclaimable page cache is counted.
+    // sysinfo().freeram only returns truly free pages and is misleadingly small
+    // on machines with large RAM where the kernel aggressively caches file I/O.
+    size_t free_ram = 0;
+    if (std::ifstream meminfo("/proc/meminfo"); meminfo) {
+      std::string line;
+      while (std::getline(meminfo, line)) {
+        if (line.starts_with("MemAvailable:")) {
+          size_t kb = 0;
+          std::sscanf(line.c_str(), "MemAvailable: %zu kB", &kb);
+          free_ram = kb * 1024ULL;
+          break;
+        }
+      }
+    }
 
     if (snap_bytes < free_ram * 7 / 10) {
       actual_storage = 0; // MEMORY
@@ -208,6 +219,8 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     progress_interval = 1; // Ensure at least 1 to avoid division by zero
   }
 
+  long long disk_write_ms = 0;
+
   // Time-stepping loop
   for (size_t t = 0; t < task_config->nt; ++t) {
     // Apply source
@@ -229,8 +242,11 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
       std::copy(p.begin(), p.end(),
                 shot->pressure_snapshots.begin() + t * grid_size);
     } else if (use_disk && wf_out) {
+      auto t0 = std::chrono::high_resolution_clock::now();
       wf_out.write(reinterpret_cast<const char *>(p.data()),
                    grid_size * sizeof(float));
+      disk_write_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::high_resolution_clock::now() - t0).count();
     }
 
     // Save wavefield snapshot if enabled
@@ -273,14 +289,19 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
     wf_out.close();
 
   auto end_time = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-      end_time - start_time);
+  auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      end_time - start_time).count();
 
   if (verbose) {
     std::println("[starfwi][{}][forward_propagation_cpu] Shot {} progress: "
-                 "100/100. Completed in {} seconds",
-                 hostname, shot->shot_id, duration.count() / 1000.0);
+                 "100/100. Completed in {:.3f} seconds",
+                 hostname, shot->shot_id, total_ms / 1000.0);
   }
+
+  std::println("[METRIC] shot={} fwd_total_ms={} fwd_compute_ms={} "
+               "fwd_disk_write_ms={} storage={}",
+               shot->shot_id, total_ms, total_ms - disk_write_ms,
+               disk_write_ms, use_disk ? "disk" : "ram");
 }
 
 } // namespace starfwi

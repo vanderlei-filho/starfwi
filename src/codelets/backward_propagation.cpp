@@ -163,6 +163,7 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   //   p̈ = (p[t_fwd+1] − 2·p[t_fwd] + p[t_fwd−1]) / dt²
   // ================================================================
   std::vector<float> gradient(grid_size, 0.0f);
+  long long disk_read_ms = 0;
 
   SimulationConfig config;
   config.grid.nx = nx; config.grid.ny = ny; config.grid.nz = nz;
@@ -218,12 +219,15 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
     if (!use_memory && t_fwd >= 1) {
       std::swap(p_hi, p_mid);
       std::swap(p_mid, p_lo);
+      auto t0 = std::chrono::high_resolution_clock::now();
       if (t_fwd >= 2) {
         wf_in.seekg(static_cast<std::streamoff>((t_fwd - 2) * grid_size * sizeof(float)));
         wf_in.read(reinterpret_cast<char *>(p_lo.data()), grid_size * sizeof(float));
       } else {
         std::fill(p_lo.begin(), p_lo.end(), 0.0f); // p[-1] ≈ 0
       }
+      disk_read_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::high_resolution_clock::now() - t0).count();
     }
   }
 
@@ -239,13 +243,18 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   }
 
   auto end_time = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-      end_time - start_time);
+  auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      end_time - start_time).count();
 
   if (verbose)
     std::println("[starfwi][{}][backward_propagation_cpu] Shot {} adjoint "
                  "propagation completed in {:.3f} s",
-                 hostname, shot->shot_id, duration.count() / 1000.0);
+                 hostname, shot->shot_id, total_ms / 1000.0);
+
+  std::println("[METRIC] shot={} bwd_total_ms={} bwd_compute_ms={} "
+               "bwd_disk_read_ms={} storage={}",
+               shot->shot_id, total_ms, total_ms - disk_read_ms,
+               disk_read_ms, use_memory ? "ram" : "disk");
 }
 
 } // namespace starfwi
