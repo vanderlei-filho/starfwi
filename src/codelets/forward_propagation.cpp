@@ -88,6 +88,27 @@ struct starpu_codelet forward_propagation_codelet = {
  *       run on any available worker, potentially on different nodes in an
  *       MPI environment.
  */
+// Read process RSS and system MemAvailable from /proc — cheap, no syscall.
+static void log_mem(const char *hostname, const char *tag, size_t shot_id) {
+  size_t rss_kb = 0, avail_kb = 0;
+  if (std::ifstream f("/proc/self/status"); f) {
+    std::string line;
+    while (std::getline(f, line))
+      if (line.starts_with("VmRSS:")) {
+        std::sscanf(line.c_str(), "VmRSS: %zu kB", &rss_kb); break;
+      }
+  }
+  if (std::ifstream f("/proc/meminfo"); f) {
+    std::string line;
+    while (std::getline(f, line))
+      if (line.starts_with("MemAvailable:")) {
+        std::sscanf(line.c_str(), "MemAvailable: %zu kB", &avail_kb); break;
+      }
+  }
+  std::println("[MEM] host={} shot={} tag={} rss_mb={} avail_mb={}",
+               hostname, shot_id, tag, rss_kb >> 10, avail_kb >> 10);
+}
+
 void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   // Extract data from StarPU buffers
   unsigned int n_velocity = STARPU_VECTOR_GET_NX(buffers[0]);
@@ -107,6 +128,12 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
   bool verbose = arg ? arg->verbose : false;
 
   auto start_time = std::chrono::high_resolution_clock::now();
+
+  // Always log memory state at shot entry — before any allocation.
+  // This is the first line we print for each shot; if the process is killed
+  // before a shot's fwd_total_ms metric appears, these lines tell us how
+  // many shots were running and how much memory each saw.
+  log_mem(hostname, "fwd_entry", shot->shot_id);
 
   if (verbose) {
     std::println("[starfwi][{}][forward_propagation_cpu] Processing forward "
@@ -179,6 +206,18 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
 
     const size_t bytes_per_snap = grid_size * sizeof(float);
 
+    // Always print the storage decision with the numbers that drove it.
+    // These lines are the primary diagnostic when the process is killed.
+    std::println("[STORAGE] host={} shot={} snap_mb={} avail_mb={} "
+                 "threshold_mb={} n_revolve_cp={} decision={}",
+                 hostname, shot->shot_id,
+                 snap_bytes >> 20, free_ram >> 20,
+                 (free_ram * 7 / 10) >> 20,
+                 task_config->n_revolve_checkpoints,
+                 task_config->n_revolve_checkpoints >= 2 ? "REVOLVE"
+                 : snap_bytes <= free_ram * 7 / 10      ? "MEMORY"
+                                                         : "DISK");
+
     if (task_config->n_revolve_checkpoints >= 2) {
       // REVOLVE always takes priority over MEMORY when configured.
       // On large-RAM machines (r8i 128 GB, g7e 64 GB) MemAvailable easily
@@ -192,25 +231,12 @@ void forward_propagation_cpu(void *buffers[], void *cl_arg) {
       shot->revolve_segment_size = K;
       shot->revolve_checkpoints.assign(n_cp, std::vector<float>(grid_size));
       shot->revolve_checkpoint_times.resize(n_cp);
-      std::println(stderr,
-                   "[starfwi][{}][forward_propagation_cpu] Shot {}: using "
-                   "REVOLVE ({} checkpoints, segment size {}, {} MB RAM)",
-                   hostname, shot->shot_id, n_cp, K,
-                   (n_cp * bytes_per_snap) >> 20);
+      log_mem(hostname, "fwd_after_cp_alloc", shot->shot_id);
     } else if (snap_bytes <= free_ram * 7 / 10) {
       actual_storage = 0; // MEMORY — fits in RAM and REVOLVE not configured
-      if (verbose)
-        std::println("[starfwi][{}][forward_propagation_cpu] Shot {}: snapshots "
-                     "in host RAM ({} MB needed, {} MB available)",
-                     hostname, shot->shot_id, snap_bytes >> 20,
-                     (free_ram * 7 / 10) >> 20);
     } else {
       // REVOLVE not configured — fall back to disk
       actual_storage = 1;
-      std::println(stderr,
-                   "[starfwi][{}][forward_propagation_cpu] Shot {}: REVOLVE "
-                   "not configured — using disk",
-                   hostname, shot->shot_id);
     }
   }
   shot->wavefield_storage_actual = actual_storage;

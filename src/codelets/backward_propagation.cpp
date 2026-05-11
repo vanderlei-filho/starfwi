@@ -63,7 +63,7 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   // ---- Extract StarPU buffers ----
   unsigned int n_velocity = STARPU_VECTOR_GET_NX(buffers[0]);
   const float *velocity_data = (const float *)STARPU_VECTOR_GET_PTR(buffers[0]);
-  ShotData *shot = (ShotData *)STARPU_VARIABLE_GET_PTR(buffers[1]);
+  ShotData *shot       = (ShotData *)STARPU_VARIABLE_GET_PTR(buffers[1]);
   const TaskConfig *task_config =
       (const TaskConfig *)STARPU_VARIABLE_GET_PTR(buffers[2]);
   const float *receiver_x = (const float *)STARPU_VECTOR_GET_PTR(buffers[3]);
@@ -73,6 +73,28 @@ void backward_propagation_cpu(void *buffers[], void *cl_arg) {
   CodeletArg *arg = (CodeletArg *)cl_arg;
   const char *hostname = arg ? arg->hostname : "unknown";
   bool verbose = arg ? arg->verbose : false;
+
+  // Log memory before semaphore wait — captures peak pressure from concurrent
+  // forward workers still running alongside early backward tasks.
+  {
+    size_t rss_kb = 0, avail_kb = 0;
+    if (std::ifstream f("/proc/self/status"); f) {
+      std::string line;
+      while (std::getline(f, line))
+        if (line.starts_with("VmRSS:")) {
+          std::sscanf(line.c_str(), "VmRSS: %zu kB", &rss_kb); break;
+        }
+    }
+    if (std::ifstream f("/proc/meminfo"); f) {
+      std::string line;
+      while (std::getline(f, line))
+        if (line.starts_with("MemAvailable:")) {
+          std::sscanf(line.c_str(), "MemAvailable: %zu kB", &avail_kb); break;
+        }
+    }
+    std::println("[MEM] host={} shot={} tag=bwd_entry rss_mb={} avail_mb={}",
+                 hostname, shot->shot_id, rss_kb >> 10, avail_kb >> 10);
+  }
 
   // Skip if there are no residuals (misfit was not computed for this shot).
   if (shot->residuals.empty()) {
