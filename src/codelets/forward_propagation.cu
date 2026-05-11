@@ -198,43 +198,63 @@ void forward_propagation_cuda(void *buffers[], void *cl_arg) {
         shot->synthetic_data.resize((size_t)n_recv * nt);
     }
 
-    // ── Snapshot storage — three-tier auto-detection ──────────────────────────
+    // ── Snapshot storage — REVOLVE first, then three-tier auto-detection ────────
     // NONE (wavefield_storage==2): no snapshots needed (modeling path).
-    // Otherwise, select the best available strategy at runtime:
-    //   Tier 1 — GPU VRAM:  d_all_snapshots, device-to-device per step,
-    //             single bulk D2H after the loop. Fastest option.
-    //   Tier 2 — Host RAM:  shot->pressure_snapshots pre-allocated, per-step
-    //             D2H with stream sync. Avoids disk I/O.
-    //   Tier 3 — Disk:      pinned staging buffer (1 snapshot), per-step D2H
-    //             + file write. Used only when both GPU and host RAM fall short.
+    // REVOLVE: always preferred when configured — saves only n_cp checkpoints
+    //   (≈2 GB) instead of all nt snapshots (≈28 GB), preventing OOM on
+    //   large-RAM machines where the host-RAM tier would otherwise trigger.
+    //   Checkpoints are saved as per-checkpoint D2H copies inside the loop.
+    // Otherwise fallback order:
+    //   Tier 1 — GPU VRAM:  d_all_snapshots, device-to-device per step.
+    //   Tier 2 — Host RAM:  shot->pressure_snapshots, per-step D2H.
+    //   Tier 3 — Disk:      pinned staging buffer + file write.
     float       *d_all_snapshots = nullptr;  // Tier 1: full GPU snapshot buffer
-    float       *h_staging       = nullptr;  // Tier 3: per-step pinned staging
+    float       *h_staging       = nullptr;  // Tier 3 / REVOLVE checkpoint D2H
     std::ofstream wf_out;
     int actual_storage = -1; // -1 = NONE
 
     if (task_config->wavefield_storage != 2) {
         const size_t snap_bytes = (size_t)nt * grid_size * sizeof(float);
 
-        // Tier 1: GPU VRAM
-        size_t free_gpu, total_gpu;
-        cudaMemGetInfo(&free_gpu, &total_gpu);
-        if (snap_bytes < free_gpu * 8 / 10) {
-            cudaError_t err = cudaMalloc(&d_all_snapshots, snap_bytes);
-            if (err != cudaSuccess) {
-                cudaGetLastError();
-                d_all_snapshots = nullptr;
-            }
+        // REVOLVE — highest priority when configured (same logic as CPU codelet).
+        if (task_config->n_revolve_checkpoints >= 2) {
+            const size_t n_cp = task_config->n_revolve_checkpoints;
+            const size_t K    = task_config->revolve_segment_size;
+            actual_storage = 3;
+            shot->revolve_segment_size = K;
+            shot->revolve_checkpoints.assign(n_cp, std::vector<float>(grid_size));
+            shot->revolve_checkpoint_times.resize(n_cp);
+            // Pinned staging buffer for efficient D2H checkpoint copies.
+            cudaMallocHost(&h_staging, (size_t)grid_size * sizeof(float));
+            fprintf(stderr,
+                    "[starfwi][%s][forward_propagation_cuda] Shot %zu: "
+                    "using REVOLVE (%zu checkpoints, K=%zu, %zu MB RAM)\n",
+                    hostname, shot->shot_id, n_cp, K,
+                    (n_cp * grid_size * sizeof(float)) >> 20);
         }
-        if (d_all_snapshots) {
-            actual_storage = 0; // MEMORY
-            if (verbose)
-                printf("[starfwi][%s][forward_propagation_cuda] Shot %zu: "
-                       "snapshots in GPU VRAM (%zu MB)\n",
-                       hostname, shot->shot_id, snap_bytes >> 20);
+
+        // Tier 1: GPU VRAM (only if REVOLVE not selected)
+        if (actual_storage == -1) {
+            size_t free_gpu, total_gpu;
+            cudaMemGetInfo(&free_gpu, &total_gpu);
+            if (snap_bytes < free_gpu * 8 / 10) {
+                cudaError_t err = cudaMalloc(&d_all_snapshots, snap_bytes);
+                if (err != cudaSuccess) {
+                    cudaGetLastError();
+                    d_all_snapshots = nullptr;
+                }
+            }
+            if (d_all_snapshots) {
+                actual_storage = 0; // MEMORY
+                if (verbose)
+                    printf("[starfwi][%s][forward_propagation_cuda] Shot %zu: "
+                           "snapshots in GPU VRAM (%zu MB)\n",
+                           hostname, shot->shot_id, snap_bytes >> 20);
+            }
         }
 
         // Tier 2: Host RAM
-        if (!d_all_snapshots) {
+        if (actual_storage == -1) {
             struct sysinfo si{};
             sysinfo(&si);
             size_t free_ram = (size_t)si.freeram * si.mem_unit;
@@ -251,9 +271,10 @@ void forward_propagation_cuda(void *buffers[], void *cl_arg) {
         }
 
         // Tier 3: Disk
-        if (!d_all_snapshots && actual_storage == -1) {
+        if (actual_storage == -1) {
             actual_storage = 1; // DISK
-            cudaMallocHost(&h_staging, (size_t)grid_size * sizeof(float));
+            if (!h_staging)
+                cudaMallocHost(&h_staging, (size_t)grid_size * sizeof(float));
             mkdir(task_config->wavefield_dir, 0755);
             char wf_path[512];
             snprintf(wf_path, sizeof(wf_path), "%s/fwd_shot_%zu.bin",
@@ -272,8 +293,9 @@ void forward_propagation_cuda(void *buffers[], void *cl_arg) {
     }
     shot->wavefield_storage_actual = actual_storage;
 
-    const bool use_memory = (actual_storage == 0);
-    const bool use_disk   = (actual_storage == 1);
+    const bool use_memory  = (actual_storage == 0);
+    const bool use_disk    = (actual_storage == 1);
+    const bool use_revolve = (actual_storage == 3);
 
     // ── Time loop ─────────────────────────────────────────────────────────────
     float *d_cur = d_p_cur, *d_old = d_p_old, *d_new = d_p_new;
@@ -297,7 +319,21 @@ void forward_propagation_cuda(void *buffers[], void *cl_arg) {
         }
 
         // 4. Save snapshot for adjoint propagation
-        if (d_all_snapshots) {
+        if (use_revolve && (size_t)t % task_config->revolve_segment_size == 0) {
+            // REVOLVE: save checkpoint at the start of each segment.
+            // D2H via pinned staging buffer — sync so the host copy is complete
+            // before we advance to the next timestep.
+            const size_t cp_idx = (size_t)t / task_config->revolve_segment_size;
+            if (cp_idx < shot->revolve_checkpoints.size() && h_staging) {
+                cudaMemcpyAsync(h_staging, d_new,
+                                (size_t)grid_size * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream);
+                cudaStreamSynchronize(stream);
+                std::copy(h_staging, h_staging + grid_size,
+                          shot->revolve_checkpoints[cp_idx].begin());
+                shot->revolve_checkpoint_times[cp_idx] = (size_t)t;
+            }
+        } else if (d_all_snapshots) {
             // Tier 1: device-to-device, fast, no sync needed
             cudaMemcpyAsync(d_all_snapshots + (size_t)t * grid_size,
                             d_new, (size_t)grid_size * sizeof(float),
