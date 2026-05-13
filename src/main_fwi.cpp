@@ -519,6 +519,7 @@ int main(int argc, char **argv) {
   g_cp_comm_size = size;
   starpu_mpi_checkpoint_template_t cp_template = nullptr;
   int shots_completed = 0;
+  int current_iter = 0;
 
   if (!args.checkpoint_dir.empty()) {
     starpu_mpi_checkpoint_set_storage_path(args.checkpoint_dir.c_str());
@@ -529,6 +530,8 @@ int main(int argc, char **argv) {
         STARPU_R, velocity_handle, vel_backup_rank,
         STARPU_VALUE, &shots_completed, sizeof(int),
             (starpu_mpi_tag_t)1000, fwi_shots_backup_rank,
+        STARPU_VALUE, &current_iter, sizeof(int),
+            (starpu_mpi_tag_t)1001, fwi_shots_backup_rank,
         0);
 
     if (restart_flag) {
@@ -540,16 +543,24 @@ int main(int argc, char **argv) {
         starpu_mpi_checkpoint_restore_handle(cp_id, cp_inst, 0, 0, velocity_handle);
 
       int old_rank = (old_n_ranks > 0) ? (rank % old_n_ranks) : 0;
-      int restored = 0;
+      int restored_shots = 0;
       if (starpu_mpi_checkpoint_restore_value(cp_id, cp_inst, old_rank,
-                                              1000, &restored, sizeof(int)) == 0)
-        shots_completed = restored;
+                                              1000, &restored_shots, sizeof(int)) == 0)
+        shots_completed = restored_shots;
+
+      int restored_iter = 0;
+      if (starpu_mpi_checkpoint_restore_value(cp_id, cp_inst, old_rank,
+                                              1001, &restored_iter, sizeof(int)) == 0)
+        current_iter = restored_iter;
 
       MPI_Allreduce(MPI_IN_PLACE, &shots_completed, 1, MPI_INT, MPI_MAX,
                     MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &current_iter, 1, MPI_INT, MPI_MAX,
+                    MPI_COMM_WORLD);
+
       if (rank == 0)
-        std::println("[starfwi-fwi] Resuming from shot {} of {}",
-                     shots_completed, n_shots);
+        std::println("[starfwi-fwi] Resuming from iteration {}, shot {} of {}",
+                     current_iter + 1, shots_completed, n_shots);
     }
   }
 
@@ -559,8 +570,10 @@ int main(int argc, char **argv) {
 
   std::vector<float> full_gradient(n_velocity, 0.0f);
 
+  int start_iter = restart_flag ? current_iter : 0;
   bool interrupted = false;
-  for (int iter = 0; iter < args.num_iterations && !interrupted; ++iter) {
+  for (int iter = start_iter; iter < args.num_iterations && !interrupted; ++iter) {
+    current_iter = iter;
     if (rank == 0)
       std::println("\n[starfwi-fwi] ===== Iteration {}/{} =====",
                    iter + 1, args.num_iterations);
